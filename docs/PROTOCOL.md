@@ -84,6 +84,8 @@ Fault codes seen on hardware: 134 capacity limit, 135 time limit, 137 battery te
 
 Values aren't range-checked. They're stored as sent, and an acknowledged program can't be read back over Bluetooth.
 
+The USB read command in Bluetooth framing (`0F 5F <slot> …`) got no reply on firmware 1.27, for all four slots, and running slots carried on unaffected. No Bluetooth program read is known.
+
 ## USB frames
 
 Requests are one 64-byte report: `0F <len> <cmd> <data…> <checksum> FF FF`, where the checksum covers `cmd` and `data`. Reply byte 0 echoes the command.
