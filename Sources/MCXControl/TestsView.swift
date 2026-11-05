@@ -39,6 +39,7 @@ struct TestsView: View {
 struct RunReport: View {
     @Environment(AppModel.self) private var model
     let run: RunRecord
+    @Local private var confirmDelete = false
     var body: some View {
         let (samples, a) = model.analysis(of: run)
         let rated = model.cell(run.cellID)?.rated ?? 0
@@ -56,7 +57,9 @@ struct RunReport: View {
                             ForEach(model.cells) { Text($0.label).tag(Int64?.some($0.id)) }
                         }.frame(maxWidth: 190)
                         Button("Export CSV") { export(samples) }.buttonStyle(.glass)
-                        Button("Delete", role: .destructive) { model.delete(run: run) }.buttonStyle(.glass)
+                        Button("Delete", role: .destructive) { confirmDelete = true }.buttonStyle(.glass)
+                            .disabled(run.id == model.currentRun[run.slot])
+                            .help(run.id == model.currentRun[run.slot] ? "This test is still recording." : "Delete this test")
                     }
                     Grid(alignment: .leading, horizontalSpacing: 16) {
                         GridRow {
@@ -93,6 +96,9 @@ struct RunReport: View {
                 .panel()
             }
         }
+        .confirmationDialog("Delete this test and its recorded data?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive) { model.delete(run: run) }
+        } message: { Text("This can't be undone.") }
     }
     private func subtitle(_ a: RunAnalysis) -> String {
         var parts = ["Slot \(run.slot + 1)", run.started.formatted(date: .abbreviated, time: .shortened)]

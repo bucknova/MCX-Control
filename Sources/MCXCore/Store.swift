@@ -20,10 +20,12 @@ public struct NamedProgram: Identifiable, Equatable, Sendable { public var name:
 /// SQLite on the main thread: at most a few short inserts per second.
 public final class Store {
     private var db: OpaquePointer?
+    /// Called when a write fails, so a full disk can't quietly lose a test.
+    public var onError: ((String) -> Void)?
     private let T = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     public init(path: String) throws {
-        try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        if path != ":memory:" { try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true) }
         guard sqlite3_open(path, &db) == SQLITE_OK else { throw NSError(domain: "Store", code: 1, userInfo: [NSLocalizedDescriptionKey: "Can't open the database at \(path)"]) }
         try exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")
         try exec("""
@@ -44,7 +46,7 @@ public final class Store {
     private func v(_ x: String?) -> V { x.map { .s($0) } ?? .null }
     @discardableResult private func run(_ sql: String, _ args: [V] = [], row: ((OpaquePointer) -> Void)? = nil) -> Bool {
         var st: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK, let st else { return false }
+        guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK, let st else { onError?(String(cString: sqlite3_errmsg(db))); return false }
         defer { sqlite3_finalize(st) }
         for (i, a) in args.enumerated() {
             let n = Int32(i + 1)
@@ -57,7 +59,9 @@ public final class Store {
         }
         while true {
             let r = sqlite3_step(st)
-            if r == SQLITE_ROW { row?(st) } else { return r == SQLITE_DONE }
+            if r == SQLITE_ROW { row?(st); continue }
+            if r != SQLITE_DONE { onError?(String(cString: sqlite3_errmsg(db))) }
+            return r == SQLITE_DONE
         }
     }
     private func optInt(_ st: OpaquePointer, _ i: Int32) -> Int? { sqlite3_column_type(st, i) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(st, i)) }
@@ -81,9 +85,9 @@ public final class Store {
     public func delete(cell id: Int64) { run("DELETE FROM cells WHERE id=?", [.i(id)]) }
 
     // MARK: Runs
-    public func createRun(slot: Int, cellID: Int64?, type: UInt8, mode: UInt8, program p: Program?, started: Date, joinedAt: Int) -> Int64 {
-        run("INSERT INTO runs(slot,cell_id,type,mode,program,started,joined_at) VALUES(?,?,?,?,?,?,?)", [.i(Int64(slot)), v(cellID), .i(Int64(type)), .i(Int64(mode)), v(json(p)), .d(started.timeIntervalSince1970), .i(Int64(joinedAt))])
-        return sqlite3_last_insert_rowid(db)
+    public func createRun(slot: Int, cellID: Int64?, type: UInt8, mode: UInt8, program p: Program?, started: Date, joinedAt: Int) -> Int64? {
+        let ok = run("INSERT INTO runs(slot,cell_id,type,mode,program,started,joined_at) VALUES(?,?,?,?,?,?,?)", [.i(Int64(slot)), v(cellID), .i(Int64(type)), .i(Int64(mode)), v(json(p)), .d(started.timeIntervalSince1970), .i(Int64(joinedAt))])
+        return ok ? sqlite3_last_insert_rowid(db) : nil
     }
     public func append(run id: Int64, _ s: Sample) {
         run("INSERT INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", [.i(id), .d(s.time.timeIntervalSince1970), .i(Int64(s.cycle)), .i(Int64(s.status)), .i(Int64(s.elapsed)), .i(Int64(s.millivolts)), v(s.loadedMillivolts), .i(Int64(s.milliamps)), .d(s.capacity), .d(s.temperature), v(s.internalResistance), v(s.energy), .s(s.source.rawValue)])

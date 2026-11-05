@@ -112,6 +112,9 @@ struct ConnectionChip: View {
             if let f = model.charger.firmware { Text("· Firmware \(f)").foregroundStyle(.secondary) }
         }
         .font(.callout).padding(.horizontal, 8)
+        .contextMenu {
+            if model.charger.isPaired { Button("Forget paired Bluetooth charger") { model.charger.forgetPairing() } }
+        }
     }
 }
 
@@ -119,6 +122,10 @@ struct BannerView: View {
     @Environment(AppModel.self) private var model
     var body: some View {
         VStack(spacing: 6) {
+            if !model.charger.isPaired && !model.charger.candidates.isEmpty { PairingBar() }
+            if model.charger.identity?.isFahrenheit == true {
+                bar("The charger is set to °F. Programs are locked and temperatures may be in °F, not the °C shown. Change it to °C on the charger.", dismiss: nil)
+            }
             if model.charger.bluetoothDenied {
                 bar("Bluetooth access is off for this app. Turn it on in System Settings › Privacy & Security › Bluetooth to use it.", dismiss: nil)
             }
@@ -131,6 +138,26 @@ struct BannerView: View {
             Text(t).lineLimit(3).frame(maxWidth: .infinity, alignment: .leading)
             if let dismiss { Button("Dismiss", action: dismiss).buttonStyle(.glass) }
         }
+        .padding(12)
+        .glassEffect(.regular, in: .rect(cornerRadius: 14))
+        .padding(.horizontal, 16).padding(.top, 6)
+    }
+}
+
+/// Bluetooth has no way to tell chargers apart by itself, so you choose which one this Mac controls.
+struct PairingBar: View {
+    @Environment(AppModel.self) private var model
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Choose your charger for Bluetooth control").fontWeight(.semibold)
+            Text(model.charger.candidates.count > 1 ? "More than one is nearby. The strongest signal is usually the closest." : "Only pair with a charger you own.").font(.callout).foregroundStyle(.secondary)
+            HStack {
+                ForEach(model.charger.candidates) { c in
+                    Button("\(c.name) ···\(c.id.uuidString.suffix(4)) · \(c.signal) dBm") { model.charger.pair(with: c.id) }.buttonStyle(.glass)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .glassEffect(.regular, in: .rect(cornerRadius: 14))
         .padding(.horizontal, 16).padding(.top, 6)

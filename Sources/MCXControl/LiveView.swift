@@ -48,10 +48,9 @@ struct SlotDetail: View {
     @Environment(AppModel.self) private var model
     let slot: Int
     var body: some View {
-        @Bindable var model = model
         let r = model.charger.readings[slot]
         let samples = model.live[slot]
-        let a = Analysis.analyze(samples)
+        let a = model.liveAnalysis[slot] ?? Analysis.analyze(samples)
         let calc = a.phases.last?.calculatedCapacity
         let current = r.map { $0.status.isActive || $0.status.isDone || $0.status.isFault } ?? false
         VStack(alignment: .leading, spacing: 16) {
@@ -59,7 +58,7 @@ struct SlotDetail: View {
                 Text("Slot \(slot + 1)").font(.title3.weight(.semibold))
                 if let r { Text("\(r.type?.name ?? "") \(r.mode?.name(for: r.type) ?? "")").foregroundStyle(.secondary) }
                 Spacer()
-                Picker("Cell", selection: $model.slotCell[slot]) {
+                Picker("Cell", selection: Binding(get: { model.slotCell[slot] }, set: { model.setCell($0, slot: slot) })) {
                     Text("Not assigned").tag(Int64?.none)
                     ForEach(model.cells) { Text($0.label).tag(Int64?.some($0.id)) }
                 }
@@ -80,7 +79,7 @@ struct SlotDetail: View {
                     }
                 }
             }
-            RunCharts(samples: samples, height: 260)
+            RunCharts(samples: samples, height: 260).equatable()
         }
         .panel()
     }

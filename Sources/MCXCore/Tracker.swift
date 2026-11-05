@@ -4,7 +4,6 @@ import Foundation
 public struct RunTracker: Sendable {
     public enum Event: Equatable, Sendable {
         case started(joined: Bool)
-        case resumed
         case sample
         case ended(status: SlotStatus, reason: EndReason)
     }

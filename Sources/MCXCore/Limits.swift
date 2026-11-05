@@ -53,6 +53,7 @@ public enum Limits {
             return out
         }
         if rated <= 0 { block("Rated capacity", "Enter the cell's rated capacity.") }
+        if !p.isEncodable { block("Program", "A value is negative or too large. Check every field, including any that aren't shown for this mode.") }
 
         if p.mode == .storageOrBreakIn && p.type.isNickel && rated > 0 && p.chargeCurrent > rated / 10 + rated / 50 {
             warn("Charge current", String(format: "Break-in is normally a long charge at about 0.1C (%d mA). This is %.1fC, and it may not stop when the cell is full. Watch the cell closely.", rated / 10, Double(p.chargeCurrent) / Double(rated)))
@@ -73,13 +74,14 @@ public enum Limits {
                 warn("Charge stop", "Above the usual \(Format.volts(stopTypical)) for \(p.type.name). Only use this if the cell's datasheet allows it.")
             }
             if p.type.isNickel {
-                if p.negativeDeltaMillivolts < 0 || p.negativeDeltaMillivolts > 20 { block("-dV", "Must be 0–20 mV.") }
+                if p.negativeDeltaMillivolts > 20 { block("-dV", "Must be 0–20 mV.") }
                 else if p.negativeDeltaMillivolts == 0 { warn("-dV", "Off means the charge relies on its voltage, capacity, time and temperature limits to stop.") }
             }
             if p.keepMillivolts != 0 && !v.keep.contains(p.keepMillivolts) {
                 block("Keep voltage", "Must be Off or \(Format.volts(v.keep.lowerBound))–\(Format.volts(v.keep.upperBound)) for \(p.type.name).")
             }
-            if p.trickleUnits < 0 || p.trickleUnits > 30 { block("Trickle", "Must be 0–300 mA.") }
+            if p.trickleUnits > 30 { block("Trickle", "Must be 0–300 mA.") }
+            if p.chargeEndCurrent > p.chargeCurrent { block("Charge end current", "Can't be higher than the charge current.") }
             if p.capacityLimit > 0 && rated > 0 && p.capacityLimit <= rated {
                 warn("Capacity limit", "The run ends at \(p.capacityLimit) mAh, which could cut a charge short. For benchmarks, use about 120% of rated, or Off.")
             }
@@ -109,9 +111,38 @@ public enum Limits {
         }
         if p.timeLimitMinutes > 1440 { block("Time limit", "Must be 1,440 minutes or less.") }
         if p.timeLimitMinutes == 0 { warn("Time limit", "Off means no time backstop if the charger misses the end of charge.") }
-        if p.mode == .cycle && (p.cycles < 1 || p.cycles > 99) { block("Cycles", "Must be 1–99.") }
+        if p.timeLimitMinutes > 0, let estimate = estimatedMinutes(p, rated: rated), Double(p.timeLimitMinutes) < estimate {
+            warn("Time limit", "A full run at these currents may take about \(Int(estimate)) minutes, so this limit could end it early.")
+        }
+        if p.cycles < 1 || p.cycles > 99 { block("Cycles", "Must be 1–99.") }
+        if p.cycleMode > 3 { block("Cycle order", "Pick an order from the list.") }
         if p.chargeRestMinutes > 240 || p.dischargeRestMinutes > 240 { block("Rest", "Rest must be 240 minutes or less.") }
         return out
+    }
+
+    /// Roughly how long a full run takes, ignoring cycle counts beyond the first. nil without enough to go on.
+    public static func estimatedMinutes(_ p: Program, rated: Int) -> Double? {
+        guard rated > 0, p.chargeCurrent > 0, p.dischargeCurrent > 0 else { return nil }
+        let charge = Double(rated) / Double(p.chargeCurrent) * 60, discharge = Double(rated) / Double(p.dischargeCurrent) * 60
+        switch p.mode {
+        case .charge: return charge
+        case .discharge: return discharge
+        case .storageOrBreakIn: return p.type.isNickel ? nil : charge
+        case .refresh, .cycle: return charge * 2 + discharge
+        }
+    }
+    /// A backstop with some margin: well past a normal run, but still a limit.
+    public static func suggestedTimeLimit(_ p: Program, rated: Int) -> Int {
+        guard let e = estimatedMinutes(p, rated: rated) else { return 0 }
+        return min(1440, Int(e * 1.6) + 30)
+    }
+
+    /// True when the same slot reads too differently over USB and Bluetooth to be the same cell in the same charger.
+    public static func looksLikeDifferentCharger(usb: SlotReading, bluetooth: SlotReading) -> Bool {
+        if usb.hasCell != bluetooth.hasCell { return true }
+        if abs(usb.temperature - bluetooth.temperature) > 5 { return true }
+        let tolerance = usb.status.isActive || bluetooth.status.isActive ? 200 : 100
+        return usb.hasCell && abs(usb.millivolts - bluetooth.millivolts) > tolerance
     }
 
     /// A sensible starting point for a cell, at the given C-rate where the charger allows it.
@@ -139,21 +170,22 @@ public enum Limits {
             return p
         }
         p.temperatureCutoff = 45
-        let hours = Double(rated) / Double(max(i, 1))
-        p.timeLimitMinutes = min(1440, Int(hours * 60 * (mode.charges && mode.discharges ? 3.5 : 1.6)) + 30)
+        p.timeLimitMinutes = suggestedTimeLimit(p, rated: rated)
         return p
     }
 
     /// Hard limits while a slot runs. A breach on consecutive readings stops the slot.
-    public static func runtimeProblem(_ r: SlotReading, program: Program?) -> String? {
+    public static func runtimeProblem(_ r: SlotReading, program: Program?, checkTemperature: Bool = true) -> String? {
         guard r.status.isActive else { return nil }
         let type = r.type
         let typeMax = type?.isNickel == true ? 1850 : type == .li435 ? 4450 : type?.isLithium == true ? 4300 : 5000
         let maxMV = program.map { $0.chargeStopMillivolts + 120 } ?? typeMax
         if r.millivolts > maxMV { return "voltage reached \(Format.volts(r.millivolts))" }
         let cutoff = Double(program?.temperatureCutoff ?? 55)
-        if r.temperature >= cutoff + 5 { return String(format: "temperature reached %.1f °C", r.temperature) }
-        let maxI = program.map { max($0.chargeCurrent, $0.dischargeCurrent) + max(150, max($0.chargeCurrent, $0.dischargeCurrent) / 10) } ?? 3300
+        if checkTemperature, r.temperature >= cutoff + 5 { return String(format: "temperature reached %.1f °C", r.temperature) }
+        // Judged against the direction the slot is actually running in.
+        let target = program.map { r.status.raw == 2 ? $0.dischargeCurrent : r.status.raw == 1 ? $0.chargeCurrent : 0 }
+        let maxI = target.map { $0 + max(150, $0 / 10) } ?? 3300
         if r.milliamps > maxI { return "current reached \(r.milliamps) mA" }
         return nil
     }

@@ -19,9 +19,11 @@ func chartPoints(_ raw: [Sample]) -> [ChartPoint] {
 
 private func phaseColor(_ s: UInt8) -> Color { s == 1 ? .blue : s == 2 ? .orange : .gray }
 
-struct RunCharts: View {
+struct RunCharts: View, Equatable {
     let samples: [Sample]
     var height: CGFloat = 200
+    /// Redraws for a new reading, not every time something else on the screen changes.
+    static func == (a: RunCharts, b: RunCharts) -> Bool { a.height == b.height && a.samples.count == b.samples.count && a.samples.last?.time == b.samples.last?.time && a.samples.first?.time == b.samples.first?.time }
     @Local private var metric = "Voltage"
     var body: some View {
         let p = chartPoints(samples)

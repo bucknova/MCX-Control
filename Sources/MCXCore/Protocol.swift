@@ -138,9 +138,9 @@ public struct Program: Equatable, Hashable, Codable, Sendable {
         put(5, capacityLimit); put(7, chargeCurrent); put(9, dischargeCurrent)
         put(11, chargeStopMillivolts); put(13, dischargeStopMillivolts)
         put(15, chargeEndCurrent); put(17, dischargeEndCurrent)
-        b[19] = UInt8(chargeRestMinutes); b[20] = UInt8(cycles); b[21] = UInt8(cycleMode)
-        b[22] = UInt8(negativeDeltaMillivolts); b[23] = UInt8(trickleUnits)
-        put(24, keepMillivolts); b[26] = UInt8(temperatureCutoff); put(27, timeLimitMinutes); b[29] = UInt8(dischargeRestMinutes)
+        b[19] = UInt8(clamping: chargeRestMinutes); b[20] = UInt8(clamping: cycles); b[21] = UInt8(clamping: cycleMode)
+        b[22] = UInt8(clamping: negativeDeltaMillivolts); b[23] = UInt8(clamping: trickleUnits)
+        put(24, keepMillivolts); b[26] = UInt8(clamping: temperatureCutoff); put(27, timeLimitMinutes); b[29] = UInt8(clamping: dischargeRestMinutes)
         b[39] = Wire.checksum(b[0..<39])
         return b
     }
@@ -153,9 +153,9 @@ public struct Program: Equatable, Hashable, Codable, Sendable {
         put(6, capacityLimit); f[8] = mode.rawValue
         put(9, chargeCurrent); put(11, dischargeCurrent); put(13, dischargeStopMillivolts); put(15, chargeStopMillivolts)
         put(17, chargeEndCurrent); put(19, dischargeEndCurrent)
-        f[21] = UInt8(cycles); f[22] = UInt8(chargeRestMinutes); f[23] = UInt8(dischargeRestMinutes); f[24] = UInt8(cycleMode)
-        f[25] = UInt8(negativeDeltaMillivolts); f[26] = UInt8(trickleUnits); f[27] = trickleTime
-        f[28] = UInt8(temperatureCutoff); put(29, timeLimitMinutes); put(31, keepMillivolts)
+        f[21] = UInt8(clamping: cycles); f[22] = UInt8(clamping: chargeRestMinutes); f[23] = UInt8(clamping: dischargeRestMinutes); f[24] = UInt8(clamping: cycleMode)
+        f[25] = UInt8(clamping: negativeDeltaMillivolts); f[26] = UInt8(clamping: trickleUnits); f[27] = trickleTime
+        f[28] = UInt8(clamping: temperatureCutoff); put(29, timeLimitMinutes); put(31, keepMillivolts)
         f[33] = Wire.checksum(f[2..<33]); f[34] = 0xFF; f[35] = 0xFF
         return f
     }
@@ -168,6 +168,13 @@ public struct Program: Equatable, Hashable, Codable, Sendable {
         dischargeStopMillivolts = u(11); chargeStopMillivolts = u(13); chargeEndCurrent = u(15); dischargeEndCurrent = u(17)
         cycles = Int(r[19]); chargeRestMinutes = Int(r[20]); cycleMode = Int(r[21]); negativeDeltaMillivolts = Int(r[22]); trickleUnits = Int(r[23])
         keepMillivolts = u(24); temperatureCutoff = Int(r[26]); timeLimitMinutes = u(27); dischargeRestMinutes = Int(r[31])
+    }
+
+    /// Whether every field fits the frame without being clamped or wrapped. Checked for every mode, because hidden fields are written too.
+    public var isEncodable: Bool {
+        let bytes = [chargeRestMinutes, cycles, cycleMode, negativeDeltaMillivolts, trickleUnits, temperatureCutoff, dischargeRestMinutes]
+        let words = [capacityLimit, chargeCurrent, dischargeCurrent, chargeStopMillivolts, dischargeStopMillivolts, chargeEndCurrent, dischargeEndCurrent, keepMillivolts, timeLimitMinutes]
+        return bytes.allSatisfy { (0...255).contains($0) } && words.allSatisfy { (0...65535).contains($0) }
     }
 
     /// Every field, labeled for the check-before-start screen.
@@ -203,6 +210,7 @@ public enum Wire {
     }
     public static func bleStatus(slot: Int) -> [UInt8] { ble(0x55, [UInt8(slot)]) }
     public static func bleVersion() -> [UInt8] { ble(0x57) }
+    public static func bleSettings() -> [UInt8] { ble(0x61) }
     public static func bleCurve(slot: Int) -> [UInt8] { ble(0x56, [UInt8(slot)]) }
     public static func bleStart(slot: Int) -> [UInt8] { ble(0x05, [UInt8(1 << slot)]) }
     public static func bleStop(slot: Int) -> [UInt8] { ble(0xFE, [UInt8(1 << slot)]) }
@@ -234,6 +242,9 @@ public enum Wire {
 
     public struct Version: Equatable, Sendable {
         public let firmware: String; public let hardware: String; public let machineID: String
+        /// Whether the charger is set to °F. nil until it's been read.
+        public var isFahrenheit: Bool?
+        public init(firmware: String, hardware: String, machineID: String, isFahrenheit: Bool? = nil) { self.firmware = firmware; self.hardware = hardware; self.machineID = machineID; self.isFahrenheit = isFahrenheit }
         /// The ID every MC3000 seen so far reports. Program and start frames are MC3000-specific; other models use different commands.
         public static let mc3000ID = "100083"
         public var isMC3000: Bool { machineID == Self.mc3000ID }
@@ -244,8 +255,12 @@ public enum Wire {
         guard b.count == 20, b[1] == 0x57 else { return nil }
         return Version(firmware: String(format: "%d.%02d", b[14], b[15]), hardware: String(format: "%d.%d", b[16] / 10, b[16] % 10), machineID: ascii(b[3...8]))
     }
+    public static func parseBluetoothIsFahrenheit(_ b: [UInt8]) -> Bool? {
+        guard b.count == 20, b[1] == 0x61, checksum(b[0..<19]) == b[19] else { return nil }
+        return b[2] == 1
+    }
     public static func parseUSBVersion(_ r: [UInt8]) -> Version? {
         guard r.count >= 30, r[0] == 0x5A else { return nil }
-        return Version(firmware: String(format: "%d.%02d", r[27], r[28]), hardware: String(format: "%d.%d", r[29] / 10, r[29] % 10), machineID: ascii(r[16...21]))
+        return Version(firmware: String(format: "%d.%02d", r[27], r[28]), hardware: String(format: "%d.%d", r[29] / 10, r[29] % 10), machineID: ascii(r[16...21]), isFahrenheit: r[8] == 1)
     }
 }

@@ -11,13 +11,14 @@ struct CellsView: View {
     @Environment(AppModel.self) private var model
     @Local private var selection: Int64?
     @Local private var showAdd = false
+    @Local private var confirmDelete = false
     var body: some View {
         let rows = model.cells.map { CellRow(cell: $0, run: model.latest(for: $0)) }
         VStack(spacing: 16) {
             HStack {
                 Text("\(model.cells.count) cell\(model.cells.count == 1 ? "" : "s")").font(.headline)
                 Spacer()
-                Button("Delete cell", systemImage: "trash") { if let s = selection { model.store.delete(cell: s); selection = nil; model.reload() } }.buttonStyle(.glass).disabled(selection == nil)
+                Button("Delete cell", systemImage: "trash") { confirmDelete = true }.buttonStyle(.glass).disabled(selection == nil)
                 Button("Add cell", systemImage: "plus") { showAdd = true }.buttonStyle(.glass)
             }
             Table(rows, selection: $selection) {
@@ -40,6 +41,9 @@ struct CellsView: View {
         }
         .padding([.horizontal, .bottom], 16)
         .sheet(isPresented: $showAdd) { AddCell().environment(model) }
+        .confirmationDialog("Delete this cell?", isPresented: $confirmDelete) {
+            Button("Delete", role: .destructive) { if let s = selection { model.store.delete(cell: s); selection = nil; model.reload() } }
+        } message: { Text("Its tests are kept, but they'll no longer be linked to a cell.") }
     }
 }
 
@@ -82,18 +86,20 @@ struct AddCell: View {
     @Local private var type = BatteryType.nimh
     @Local private var rated = 2450
     @Local private var notes = ""
+    @Local private var failed = false
     var body: some View {
         Form {
             TextField("Label", text: $label, prompt: Text("E-01"))
             Picker("Type", selection: $type) { ForEach(BatteryType.allCases) { Text($0.name).tag($0) } }
             TextField("Rated capacity (mAh)", value: $rated, format: .number.grouping(.never))
             TextField("Notes", text: $notes)
+            if failed { Text("A cell with that label already exists.").foregroundStyle(.red) }
         }
         .formStyle(.grouped).frame(width: 400, height: 280)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             ToolbarItem(placement: .confirmationAction) {
-                Button("Add") { if model.store.save(Cell(label: label.trimmingCharacters(in: .whitespaces), type: type, rated: rated, notes: notes)) { model.reload(); dismiss() } }
+                Button("Add") { if model.store.save(Cell(label: label.trimmingCharacters(in: .whitespaces), type: type, rated: rated, notes: notes)) { model.reload(); dismiss() } else { failed = true } }
                     .disabled(label.trimmingCharacters(in: .whitespaces).isEmpty || rated <= 0)
             }
         }

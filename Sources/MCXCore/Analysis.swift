@@ -70,8 +70,6 @@ public enum Analysis {
         func flush() {
             guard let f = group.first, let l = group.last, let k = kind(f.status) else { group = []; return }
             var calc = 0.0, wh = 0.0
-            var hasCharger = false
-            var maxEnergy = 0, firstEnergy: Int?
             for (a, b) in zip(group, group.dropFirst()) {
                 let dt = b.time.timeIntervalSince(a.time)
                 if dt <= gapThreshold {
@@ -81,11 +79,10 @@ public enum Analysis {
                     wh += mA / 1000 * mV / 1000 * dt / 3600
                 }
             }
-            var allHaveCharger = true
-            for s in group { if let e = s.energy { hasCharger = true; maxEnergy = max(maxEnergy, e); if firstEnergy == nil { firstEnergy = e } } else { allHaveCharger = false } }
+            let chargerEnergy = group.map(\.energy)
             // The charger's energy counter only arrives over USB. If a phase changed connection partway, its last value
             // covers only part of the phase, so the calculated figure is the better one.
-            let energy = hasCharger && allHaveCharger ? Double(maxEnergy) / 1000 : wh
+            let energy = chargerEnergy.contains(where: { $0 == nil }) ? wh : Double(chargerEnergy.compactMap { $0 }.max() ?? 0) / 1000
             let volts = group.map(\.millivolts)
             let running = group.filter { $0.milliamps > 0 }
             let current = running.isEmpty ? 0 : running.map(\.milliamps).reduce(0, +) / running.count
@@ -109,14 +106,19 @@ public enum Analysis {
     }
 
     public static func downsample(_ s: [Sample], max n: Int) -> [Sample] {
-        guard s.count > n, n > 2 else { return s }
-        // Keeps the lowest-current reading in each bucket, so the charger's brief dips stay visible.
-        let size = Double(s.count) / Double(n)
-        return (0..<n).compactMap { i in
+        guard s.count > n, n > 4 else { return s }
+        // Keeps each bucket's lowest and highest current, in order, so the charger's brief dips stay visible without hiding the normal level.
+        let buckets = n / 2, size = Double(s.count) / Double(buckets)
+        var out: [Sample] = []
+        out.reserveCapacity(n)
+        for i in 0..<buckets {
             let a = Int(Double(i) * size), b = min(s.count, Int(Double(i + 1) * size))
-            guard a < b else { return nil }
-            return s[a..<b].min { $0.milliamps < $1.milliamps }
+            guard a < b else { continue }
+            let part = s[a..<b]
+            guard let lo = part.min(by: { $0.milliamps < $1.milliamps }), let hi = part.max(by: { $0.milliamps < $1.milliamps }) else { continue }
+            if lo == hi { out.append(lo) } else { out += lo.time < hi.time ? [lo, hi] : [hi, lo] }
         }
+        return out
     }
 
     public static func csv(_ s: [Sample]) -> String {

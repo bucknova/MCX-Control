@@ -62,6 +62,8 @@ struct ProgramView: View {
                         .disabled(model.charger.readings[s]?.status.isActive == true)
                 }
                 Spacer()
+                // Not every problem belongs to a field on screen, and a disabled button should say why.
+                if let b = issues.first(where: { $0.severity == .blocker }) { Text(b.message).font(.callout).foregroundStyle(.red).lineLimit(2).frame(maxWidth: 320, alignment: .trailing) }
                 Menu("Presets") {
                     ForEach(model.presets) { n in Button(n.name) { model.draft = n.program; model.draftRated = n.rated } }
                     Divider()
@@ -92,6 +94,8 @@ struct ProgramView: View {
         model.draft.chargeCurrent = min(i, Limits.maxChargeCurrent)
         let d = min(i, Limits.maxDischargeCurrent)
         model.draft.dischargeCurrent = d; model.draft.dischargeEndCurrent = d
+        // The backstops follow the currents, or a slower rate would hit the old time limit partway through.
+        if model.draft.timeLimitMinutes > 0 { model.draft.timeLimitMinutes = Limits.suggestedTimeLimit(model.draft, rated: model.draftRated) }
     }
     private func rate(_ i: Int) -> String { model.draftRated > 0 ? String(format: "%.1fC", Double(i) / Double(model.draftRated)) : "" }
 
@@ -107,7 +111,7 @@ struct ProgramView: View {
         }
     }
     @ViewBuilder private func voltage(_ title: String, value: Binding<Int>, hint: String? = nil, issues: [ProgramIssue], key: String) -> some View {
-        let volts = Binding<Double>(get: { Double(value.wrappedValue) / 1000 }, set: { value.wrappedValue = Int(($0 * 1000).rounded()) })
+        let volts = Binding<Double>(get: { Double(value.wrappedValue) / 1000 }, set: { value.wrappedValue = $0.isFinite ? Int((min(max($0, -1000), 1000) * 1000).rounded()) : -1 })
         let m = message(issues, key)
         LabeledContent {
             HStack { TextField(title, value: volts, format: .number.precision(.fractionLength(3))).labelsHidden().multilineTextAlignment(.trailing).frame(width: 90).monospacedDigit(); Text("V").foregroundStyle(.secondary).frame(width: 34, alignment: .leading) }
@@ -162,20 +166,22 @@ struct CheckSheet: View {
     }
     private func start() {
         phase = .starting; message = nil
+        model.willStart(checks: checks)
         Task {
             switch await model.charger.start(checks: checks) {
-            case .started: model.started(checks: checks); model.section = .live; dismiss()
-            case .failed(let m): message = m; phase = .checked
+            case .started: model.section = .live; dismiss()
+            case .failed(let m): model.startFailed(checks: checks); message = m; phase = .checked
             case .needsGlobalConfirmation(let o): others = o; phase = .global
             }
         }
     }
     private func startAll() {
+        model.willStart(checks: checks)
         Task {
             switch await model.charger.startAllOverUSB(checks: checks, others: others) {
-            case .started: model.started(checks: checks); model.section = .live; dismiss()
-            case .failed(let m): message = m
-            case .needsGlobalConfirmation: break
+            case .started: model.section = .live; dismiss()
+            case .failed(let m): model.startFailed(checks: checks); message = m
+            case .needsGlobalConfirmation(let o): others = o; message = "Something changed on the charger. Check this list again."
             }
         }
     }
@@ -210,7 +216,6 @@ struct CheckCard: View {
             Text(explanation).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             let sent = check.sent.fields
             let got = check.onCharger?.fields
-            let differs = zip(sent, got ?? sent).filter { $0.value != $1.value }
             if check.outcome == .mismatch, let got {
                 table(zip(sent, got).filter { $0.value != $1.value }.map { ($0.name, $0.value, $1.value) }, red: true)
             } else if check.outcome == .verified && showAll, let got {
@@ -218,21 +223,20 @@ struct CheckCard: View {
             }
             if check.outcome == .verified { Button(showAll ? "Hide fields" : "Show all \(sent.count) fields") { showAll.toggle() }.buttonStyle(.link) }
             if check.outcome == .unverifiedBluetooth { Text("The app will watch the first readings after the start and stop the slot if its type or mode is wrong, or a limit is passed.").font(.callout) }
-            let _ = differs
         }
         .panel()
     }
     private var title: String {
-        switch check.outcome { case .verified: "All \(check.sent.fields.count) fields match"; case .mismatch: "Program doesn't match"; case .writeFailed: "Write failed"; case .unverifiedBluetooth: "Sent, can't read back"; case .unsupportedCharger: "Charger not supported yet" }
+        switch check.outcome { case .verified: "All \(check.sent.fields.count) fields match"; case .mismatch: "Program doesn't match"; case .writeFailed: "Write failed"; case .unverifiedBluetooth: "Sent, can't read back"; case .notAllowed: "Not sent" }
     }
-    private var color: Color { switch check.outcome { case .verified: .green; case .mismatch, .writeFailed: .red; case .unverifiedBluetooth, .unsupportedCharger: .orange } }
+    private var color: Color { switch check.outcome { case .verified: .green; case .mismatch, .writeFailed: .red; case .unverifiedBluetooth, .notAllowed: .orange } }
     private var explanation: String {
         switch check.outcome {
         case .verified: "The charger holds exactly what was sent. Starting one slot switches to Bluetooth, so logging pauses on every slot for about 5–7 seconds, and the gap is marked."
         case .mismatch:
             if check.onCharger?.type != check.sent.type { "The charger replaced this program with different defaults. Starting it could damage the cell, so Start is off for this slot." } else { "What's on the charger differs from what was sent, so Start is off for this slot." }
         case .writeFailed: "The charger didn't accept this program, or the slot is busy. Its stored program may be unchanged. Try again."
-        case .unsupportedCharger: "Nothing was sent. This charger hasn't identified itself as an MC3000, and other models use different commands. Monitoring and stop still work where the charger answers."
+        case .notAllowed(let reason): reason
         case .unverifiedBluetooth: "The charger acknowledged it. Reading a program back needs the USB cable, so what's stored can't be confirmed."
         }
     }

@@ -20,6 +20,7 @@ struct Decoding {
     func version() throws {
         let v = try need(Wire.parseBluetoothVersion(bytes("0f 57 00 31 30 30 30 38 33 01 00 00 00 00 01 1b 16 00 a1 50")))
         expect(v.firmware == "1.27"); expect(v.hardware == "2.2"); expect(v.isMC3000)
+        expect(Wire.parseBluetoothIsFahrenheit(bytes("0f 61 00 01 01 01 00 2a f8 00 00 00 00 00 00 00 00 00 00 95")) == false)
         let u = try need(Wire.parseUSBVersion(pad(bytes("5a 00 00 00 00 00 04 01 00 01 00 01 00 00 01 f8 31 30 30 30 38 33 01 00 00 00 00 01 1b 16 00 a1"), 64)))
         expect(u.firmware == "1.27"); expect(u.hardware == "2.2"); expect(u.isMC3000)
         let other = try need(Wire.parseBluetoothVersion(bytes("0f 57 00 39 39 39 39 39 39 01 00 00 00 00 01 1b 16 00 a1 50"))); expect(!other.isMC3000)
@@ -92,6 +93,35 @@ struct LimitChecks {
         expect(!Limits.validate(b, ratedCapacity: 2450).contains { $0.field == "Charge current" })
         b.chargeCurrent = 2450; expect(blockers(b).isEmpty)
         expect(Limits.validate(b, ratedCapacity: 2450).contains { $0.severity == .warning && $0.message.contains("Break-in") })
+    }
+    func everyEncodedFieldIsChecked() {
+        func base() -> Program { Limits.suggested(type: .nimh, mode: .discharge, rated: 2450) }
+        var a = base(); a.chargeRestMinutes = -1; expect(!a.isEncodable); expect(blockers(a).contains("Program")); _ = a.bluetoothFrame(slot: 0); _ = a.usbFrame(slot: 0)
+        var b = base(); b.cycles = 300; expect(blockers(b).contains("Program")); _ = b.bluetoothFrame(slot: 0)
+        var c = base(); c.timeLimitMinutes = -1; expect(!c.isEncodable)
+        var d = base(); d.chargeEndCurrent = -5; expect(!d.isEncodable)
+        var e = base(); e.negativeDeltaMillivolts = -1; expect(!e.isEncodable); expect(blockers(base()).isEmpty)
+        var f = Limits.suggested(type: .liIon, mode: .charge, rated: 3000); f.chargeEndCurrent = 5000; expect(blockers(f, 3000).contains("Charge end current"))
+    }
+    func timeLimitFollowsCurrents() {
+        var p = Limits.suggested(type: .nimh, mode: .charge, rated: 2450, cRate: 0.5); let fast = p.timeLimitMinutes
+        p.chargeCurrent = 490; expect(Limits.validate(p, ratedCapacity: 2450).contains { $0.field == "Time limit" })
+        p.timeLimitMinutes = Limits.suggestedTimeLimit(p, rated: 2450); expect(p.timeLimitMinutes > fast)
+        expect(!Limits.validate(p, ratedCapacity: 2450).contains { $0.field == "Time limit" })
+    }
+    func runtimeCurrentFollowsDirection() {
+        var p = Program(); p.chargeCurrent = 245; p.dischargeCurrent = 490
+        let r = SlotReading(slot: 0, rawType: 3, rawMode: 2, cycle: 0, status: SlotStatus(raw: 1), elapsed: 9, millivolts: 1400, milliamps: 450, capacity: 1, temperature: 30, internalResistance: nil, source: .usb)
+        expect(Limits.runtimeProblem(r, program: p) != nil)
+        var d = r; d.status = SlotStatus(raw: 2); expect(Limits.runtimeProblem(d, program: p) == nil)
+        var hot = r; hot.milliamps = 245; hot.temperature = 86; expect(Limits.runtimeProblem(hot, program: p) != nil); expect(Limits.runtimeProblem(hot, program: p, checkTemperature: false) == nil)
+    }
+    func differentChargersAreNoticed() {
+        let u = SlotReading(slot: 0, rawType: 3, rawMode: 0, cycle: 0, status: SlotStatus(raw: 0), elapsed: 0, millivolts: 1360, loadedMillivolts: 1362, milliamps: 0, capacity: 0, temperature: 27.4, internalResistance: nil, source: .usb)
+        var same = u; same.millivolts = 1358; same.temperature = 27; same.source = .bluetooth; expect(!Limits.looksLikeDifferentCharger(usb: u, bluetooth: same))
+        var other = same; other.millivolts = 1200; expect(Limits.looksLikeDifferentCharger(usb: u, bluetooth: other))
+        var empty = same; empty.millivolts = 0; expect(Limits.looksLikeDifferentCharger(usb: u, bluetooth: empty))
+        var warm = same; warm.temperature = 40; expect(Limits.looksLikeDifferentCharger(usb: u, bluetooth: warm))
     }
     func aboveOneCOnlyWarns() {
         var p = Limits.suggested(type: .nimh, mode: .charge, rated: 2000); p.chargeCurrent = 3000
@@ -187,7 +217,12 @@ struct Analyzing {
     }
     func downsamplingKeepsDips() {
         var s = (0..<1000).map { sample(Double($0), 1, mA: 2450, cap: 0) }; s[500].milliamps = 300
-        expect(Analysis.downsample(s, max: 50).contains { $0.milliamps == 300 })
+        let d = Analysis.downsample(s, max: 50)
+        expect(d.contains { $0.milliamps == 300 }); expect(d.count <= 50); expect(d.contains { $0.milliamps == 2450 })
+        // A dip in every bucket must not hide the normal level.
+        let dips = (0..<30000).map { i in sample(Double(i), 1, mA: i % 20 == 0 ? 300 : 2450, cap: 0) }
+        let e = Analysis.downsample(dips, max: 100); expect(e.filter { $0.milliamps == 2450 }.count >= 40)
+        expect(zip(e, e.dropFirst()).allSatisfy { $0.time <= $1.time })
     }
     func packMatching() {
         let c = [("E-01", 1902.0, 29), ("E-02", 1894, 31), ("E-03", 1842, 34), ("E-04", 1889, 30), ("E-05", 1776, 47), ("E-06", 1851, 33), ("E-07", 1648, 68), ("E-08", 1897, 30)].enumerated().map { Analysis.MatchCell(id: Int64($0.offset), label: $0.element.0, capacity: $0.element.1, resistance: $0.element.2) }
@@ -210,6 +245,10 @@ run("LimitChecks.onecDischargeIsBlocked") { LimitChecks().onecDischargeIsBlocked
 run("LimitChecks.unsafeValuesThatBluetoothWouldStoreAreBlocked") { LimitChecks().unsafeValuesThatBluetoothWouldStoreAreBlocked() }
 run("LimitChecks.officialAppLimits") { LimitChecks().officialAppLimits() }
 run("LimitChecks.breakInSuggestsSlowCurrentsAndWarns") { LimitChecks().breakInSuggestsSlowCurrentsAndWarns() }
+run("LimitChecks.everyEncodedFieldIsChecked") { LimitChecks().everyEncodedFieldIsChecked() }
+run("LimitChecks.timeLimitFollowsCurrents") { LimitChecks().timeLimitFollowsCurrents() }
+run("LimitChecks.runtimeCurrentFollowsDirection") { LimitChecks().runtimeCurrentFollowsDirection() }
+run("LimitChecks.differentChargersAreNoticed") { LimitChecks().differentChargersAreNoticed() }
 run("LimitChecks.aboveOneCOnlyWarns") { LimitChecks().aboveOneCOnlyWarns() }
 run("LimitChecks.capacityLimitAtRatedWarns") { LimitChecks().capacityLimitAtRatedWarns() }
 run("LimitChecks.unsupportedTypesCannotBeProgrammed") { LimitChecks().unsupportedTypesCannotBeProgrammed() }

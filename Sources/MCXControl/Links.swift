@@ -70,6 +70,8 @@ import MCXCore
     }
 }
 
+struct BluetoothCandidate: Identifiable, Equatable { let id: UUID; let name: String; let signal: Int }
+
 @MainActor final class BluetoothLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private static let names: Set<String> = ["Charger", "SimpleBLEPeripheral", "HitecCharger"]
     private static let savedKey = "chargerBluetoothID"
@@ -78,45 +80,73 @@ import MCXCore
     private var peripheral: CBPeripheral?
     private var characteristic: CBCharacteristic?
     private var readyK: [CheckedContinuation<Bool, Never>] = []
-    private var downK: CheckedContinuation<Void, Never>?
+    private var downK: [CheckedContinuation<Void, Never>] = []
     private var pending: (match: ([UInt8]) -> Bool, k: CheckedContinuation<[UInt8]?, Never>)?
-    private var collecting: [UInt8]?
-    private var requestID = 0
-    private var discoveryTries = 0
+    private var requestID = 0, connectID = 0, disconnectID = 0
+    private var found: [UUID: (peripheral: CBPeripheral, candidate: BluetoothCandidate)] = [:]
     private let lock = AsyncLock()
     private(set) var isConnected = false
     private(set) var unauthorized = false
-    var poweredOn: Bool { central?.state == .poweredOn }
+    /// Fires on every disconnect, deliberate or not, so whoever holds this charger's identity can drop it.
     var onDisconnect: (() -> Void)?
+    var onCandidates: (([BluetoothCandidate]) -> Void)?
+
+    /// The one charger this Mac is allowed to connect to. The app never pairs with a nearby charger on its own.
+    var pairedID: UUID? { UserDefaults.standard.string(forKey: Self.savedKey).flatMap(UUID.init(uuidString:)) }
 
     func start() { central = CBCentralManager(delegate: self, queue: .main) }
 
-    nonisolated func centralManagerDidUpdateState(_ c: CBCentralManager) { MainActor.assumeIsolated { unauthorized = c.state == .unauthorized } }
+    func pair(with id: UUID) {
+        guard let f = found[id] else { return }
+        UserDefaults.standard.set(id.uuidString, forKey: Self.savedKey)
+        peripheral = f.peripheral; peripheral?.delegate = self
+        central.stopScan(); found = [:]; onCandidates?([])
+    }
+    func forgetPairing() async {
+        await disconnect()
+        UserDefaults.standard.removeObject(forKey: Self.savedKey)
+        peripheral = nil; found = [:]; onCandidates?([])
+        if central?.state == .poweredOn { central.scanForPeripherals(withServices: [service]) }
+    }
+
+    private func dropConnection() {
+        isConnected = false; characteristic = nil
+        let waiting = downK; downK = []; waiting.forEach { $0.resume() }
+        finishConnect(false)
+        if let w = pending { pending = nil; w.k.resume(returning: nil) }
+        onDisconnect?()
+    }
+
+    nonisolated func centralManagerDidUpdateState(_ c: CBCentralManager) { MainActor.assumeIsolated {
+        unauthorized = c.state == .unauthorized
+        guard c.state == .poweredOn else { dropConnection(); return } // No disconnect callback is guaranteed when the radio goes off.
+        if pairedID == nil { c.scanForPeripherals(withServices: [service]) }
+    } }
     nonisolated func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral, advertisementData a: [String: Any], rssi: NSNumber) {
         MainActor.assumeIsolated {
+            if let paired = pairedID {
+                // Scanning for the paired charger only happens when the system doesn't already know it.
+                if p.identifier == paired, !readyK.isEmpty { peripheral = p; p.delegate = self; c.stopScan(); c.connect(p) }
+                return
+            }
             // Other devices advertise the same service (an FNB58 meter does), so the name has to match too.
             let name = (a[CBAdvertisementDataLocalNameKey] as? String) ?? p.name ?? ""
-            guard Self.names.contains(name), peripheral == nil else { return }
-            UserDefaults.standard.set(p.identifier.uuidString, forKey: Self.savedKey)
-            peripheral = p; p.delegate = self; c.stopScan(); c.connect(p)
+            guard Self.names.contains(name) else { return }
+            found[p.identifier] = (p, BluetoothCandidate(id: p.identifier, name: name, signal: rssi.intValue))
+            onCandidates?(found.values.map(\.candidate).sorted { $0.signal > $1.signal })
         }
     }
     nonisolated func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) { p.discoverServices([CBUUID(string: "FFE0")]) }
     nonisolated func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) { MainActor.assumeIsolated { finishConnect(false) } }
     nonisolated func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
-        MainActor.assumeIsolated {
-            isConnected = false; characteristic = nil
-            if let k = downK { downK = nil; k.resume() } else { onDisconnect?() }
-            finishConnect(false)
-            if let w = pending { pending = nil; w.k.resume(returning: nil) }
-        }
+        MainActor.assumeIsolated { dropConnection() }
     }
     nonisolated func peripheral(_ p: CBPeripheral, didDiscoverServices e: Error?) {
         if let s = p.services?.first(where: { $0.uuid == CBUUID(string: "FFE0") }) { p.discoverCharacteristics([CBUUID(string: "FFE1")], for: s) }
     }
     nonisolated func peripheral(_ p: CBPeripheral, didDiscoverCharacteristicsFor s: CBService, error: Error?) {
         MainActor.assumeIsolated {
-            guard let c = s.characteristics?.first(where: { $0.uuid == characteristicID }) else { discoveryTries += 1; central.cancelPeripheralConnection(p); return }
+            guard let c = s.characteristics?.first(where: { $0.uuid == characteristicID }) else { central.cancelPeripheralConnection(p); return }
             characteristic = c; p.setNotifyValue(true, for: c)
         }
     }
@@ -126,25 +156,23 @@ import MCXCore
     nonisolated func peripheral(_ p: CBPeripheral, didUpdateValueFor c: CBCharacteristic, error: Error?) {
         guard let v = c.value else { return }
         let a = [UInt8](v)
-        MainActor.assumeIsolated {
-            if collecting != nil { collecting!.append(contentsOf: a); return }
-            if let w = pending, w.match(a) { pending = nil; w.k.resume(returning: a) }
-        }
+        MainActor.assumeIsolated { if let w = pending, w.match(a) { pending = nil; w.k.resume(returning: a) } }
     }
     private func finishConnect(_ ok: Bool) { let w = readyK; readyK = []; w.forEach { $0.resume(returning: ok) } }
 
     func connect(timeout: Double) async -> Bool {
-        guard let central, central.state == .poweredOn else { return false }
+        guard let central, central.state == .poweredOn, let paired = pairedID else { return false }
         if isConnected { return true }
+        connectID &+= 1
+        let id = connectID
         return await withCheckedContinuation { k in
             readyK.append(k)
-            if let p = peripheral { central.connect(p) }
-            else if let s = UserDefaults.standard.string(forKey: Self.savedKey), let id = UUID(uuidString: s), let p = central.retrievePeripherals(withIdentifiers: [id]).first {
-                peripheral = p; p.delegate = self; central.connect(p)
-            } else { central.scanForPeripherals(withServices: [service]) }
+            if peripheral == nil, let p = central.retrievePeripherals(withIdentifiers: [paired]).first { peripheral = p; p.delegate = self }
+            if let p = peripheral { central.connect(p) } else { central.scanForPeripherals(withServices: [service]) }
             DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
                 MainActor.assumeIsolated {
-                    guard let self, !self.readyK.isEmpty else { return }
+                    // Only this attempt's own timeout may end it; an earlier one's timer must not cancel a later attempt.
+                    guard let self, self.connectID == id, !self.readyK.isEmpty else { return }
                     central.stopScan()
                     if !self.isConnected, let p = self.peripheral { central.cancelPeripheralConnection(p) }
                     self.finishConnect(false)
@@ -154,9 +182,20 @@ import MCXCore
     }
     func disconnect() async {
         guard let p = peripheral, isConnected else { return }
-        await withCheckedContinuation { downK = $0; central.cancelPeripheralConnection(p) }
+        disconnectID &+= 1
+        let id = disconnectID
+        await withCheckedContinuation { k in
+            downK.append(k)
+            central.cancelPeripheralConnection(p)
+            // Don't wait forever if the callback never comes, or everything queued behind this stops too.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                MainActor.assumeIsolated { if let self, self.disconnectID == id, !self.downK.isEmpty { self.dropConnection() } }
+            }
+        }
     }
     private func write(_ b: [UInt8]) { if let c = characteristic { peripheral?.writeValue(Data(b), for: c, type: .withoutResponse) } }
+    /// Sends without waiting for the request queue. Only for stop commands, which shouldn't queue behind anything.
+    func sendNow(_ b: [UInt8]) { write(b) }
 
     func request(_ b: [UInt8], timeout: Double, match: @escaping ([UInt8]) -> Bool) async -> [UInt8]? {
         await lock.acquire(); defer { lock.release() }

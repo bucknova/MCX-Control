@@ -46,7 +46,9 @@ The app's limit checks are the main protection against bad values, and they can 
 - removing a cell mid-run, and most fault types
 - full Cycle runs and Refresh with different settings
 
-**MC5000 and other models aren't supported.** The app reads the charger's machine ID and refuses to write programs or start slots unless it matches the MC3000's. NiZn, RAM, LTO and Na-ion can be monitored but not programmed.
+**The charger must be set to °C.** Programs are locked on a charger set to °F, because that setting hasn't been tested.
+
+**MC5000 and other models aren't supported.** The app re-reads the charger's machine ID before each write or start and refuses unless it matches the MC3000's. NiZn, RAM, LTO and Na-ion can be monitored but not programmed.
 
 ## How the connections work
 
@@ -62,6 +64,8 @@ The charger's USB port stopped answering while Bluetooth was connected, so the a
 
 With both available, the app logs over USB and switches to Bluetooth to start or stop one slot, which leaves a gap of about 5–8 seconds, marked in the log.
 
+- **Pairing:** the app never pairs by itself. Choose your charger when it offers the ones nearby. Right-click the connection status to forget it. The charger's Bluetooth has no authentication of its own, so anyone in range with similar tools could still command it.
+- **Same charger check:** before a Bluetooth start, the app compares each slot over USB and Bluetooth, and refuses if they look like different chargers.
 - **Bluetooth only:** programs can't be read back, so the Start button says so. The app watches the first readings and stops the slot if its type or mode is wrong, or a limit is passed.
 - **USB only:** starting launches every loaded slot. The app shows what else would start, and refuses if another slot's stored program looks unsafe. You can't stop just one slot.
 

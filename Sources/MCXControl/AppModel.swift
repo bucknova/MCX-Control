@@ -33,12 +33,14 @@ enum AppSection: String, CaseIterable, Identifiable { case live = "Live", progra
     var draft = Limits.suggested(type: .nimh, mode: .charge, rated: 2450, cRate: 0.5)
     var draftRated = 2450
     var draftSlots: Set<Int> = []
-    var storeError: String?
+    /// Refreshed every few readings, because re-analyzing a long run several times a second adds up.
+    var liveAnalysis: [RunAnalysis?] = [nil, nil, nil, nil]
 
     @ObservationIgnored private var trackers = [RunTracker(), RunTracker(), RunTracker(), RunTracker()]
     @ObservationIgnored private var slotProgram: [Program?] = [nil, nil, nil, nil]
     @ObservationIgnored private var awake: NSObjectProtocol?
     @ObservationIgnored private var replayNoticeShown = false
+    @ObservationIgnored private var saveProblemShown = false
     @ObservationIgnored private let canNotify = Bundle.main.bundleIdentifier != nil
 
     var anyActive: Bool { charger.readings.contains { $0?.status.isActive == true } }
@@ -47,7 +49,15 @@ enum AppSection: String, CaseIterable, Identifiable { case live = "Live", progra
     init() {
         let env = ProcessInfo.processInfo.environment
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("MC-X Control")
-        store = try! Store(path: env["MCX_DB"] ?? dir.appendingPathComponent("monitor.sqlite").path)
+        var openProblem: String?
+        do { store = try Store(path: env["MCX_DB"] ?? dir.appendingPathComponent("monitor.sqlite").path) }
+        catch {
+            // Keep monitoring and stop controls working even if history can't be opened.
+            openProblem = "Test history couldn't be opened, so this session won't be saved: \(error.localizedDescription)"
+            store = try! Store(path: ":memory:")
+        }
+        banner = openProblem
+        store.onError = { [weak self] message in self?.saveFailed(message) }
         reload()
         for s in 0..<4 {
             if let r = store.openRun(slot: s) {
@@ -65,27 +75,42 @@ enum AppSection: String, CaseIterable, Identifiable { case live = "Live", progra
         Task { await watchConnection() }
     }
 
+    private func saveFailed(_ message: String) {
+        guard !saveProblemShown else { return }
+        saveProblemShown = true
+        alert("Test data isn't being saved", "\(message). Check free disk space. The charger keeps running.")
+    }
+
+    /// Applies to the slot's run in progress too, and to the next run if none is going.
+    func setCell(_ id: Int64?, slot: Int) {
+        slotCell[slot] = id
+        if let run = currentRun[slot] { store.assign(run: run, cell: id); runs = store.runs() }
+    }
+
     func reload() { cells = store.cells(); runs = store.runs(); presets = store.presets() }
     func cell(_ id: Int64?) -> Cell? { id.flatMap { i in cells.first { $0.id == i } } }
 
     private func handle(_ r: SlotReading, at t: Date) {
         let s = r.slot
+        // A cell taken out takes its assignment with it, so the next one isn't recorded under its name.
+        if !r.hasCell, !r.status.isActive, currentRun[s] == nil { slotCell[s] = nil }
         for e in trackers[s].ingest(r) {
             switch e {
             case .started(let joined):
                 currentRun[s] = store.createRun(slot: s, cellID: slotCell[s], type: r.rawType, mode: r.rawMode, program: slotProgram[s], started: t, joinedAt: joined ? r.elapsed : 0)
-                live[s] = []; runs = store.runs(); updateAwake()
-            case .resumed: break
+                live[s] = []; liveAnalysis[s] = nil; runs = store.runs(); updateAwake()
             case .sample:
                 guard let id = currentRun[s] else { continue }
                 let x = Sample(reading: r, at: t)
                 store.append(run: id, x); live[s].append(x)
+                if live[s].count % 5 == 0 { liveAnalysis[s] = Analysis.analyze(live[s]) }
             case .ended(let status, let reason):
                 guard let id = currentRun[s] else { continue }
                 let a = Analysis.analyze(live[s])
+                liveAnalysis[s] = a
                 store.finish(run: id, status: status.raw, reason: reason.rawValue, at: t, analysis: a)
+                let who = cell(runs.first { $0.id == id }?.cellID)?.label ?? "Slot \(s + 1)"
                 currentRun[s] = nil; slotProgram[s] = nil; runs = store.runs(); updateAwake()
-                let who = cell(slotCell[s])?.label ?? "Slot \(s + 1)"
                 let cap = a.dischargeCapacity ?? (a.chargeCapacity > 0 ? a.chargeCapacity : nil)
                 let capText = cap.map { String(format: "%.0f mAh", $0) } ?? "no capacity recorded"
                 switch reason {
@@ -115,7 +140,10 @@ enum AppSection: String, CaseIterable, Identifiable { case live = "Live", progra
             if silent && anyRecording && !lostConnection {
                 lostConnection = true
                 alert("Connection lost", "Tests are still running on the charger, but they aren't being recorded. Reconnecting automatically; the gap will be marked.")
-            } else if !silent && lostConnection { lostConnection = false; banner = nil }
+            } else if !silent && lostConnection {
+                lostConnection = false
+                if banner?.hasPrefix("Connection lost") == true { banner = nil }
+            }
         }
     }
 
@@ -126,7 +154,7 @@ enum AppSection: String, CaseIterable, Identifiable { case live = "Live", progra
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
     }
 
-    func stopAll() { Task { let ok = await charger.stopAll(); if !ok { alert("Stop not confirmed", "Stop the charger with its buttons.") } } }
+    func stopAll() { guard !charger.isReplay else { return }; Task { let ok = await charger.stopAll(); if !ok { alert("Stop not confirmed", "Stop the charger with its buttons.") } } }
     func stop(slot: Int) {
         Task {
             switch await charger.stop(slot: slot) {
@@ -136,14 +164,20 @@ enum AppSection: String, CaseIterable, Identifiable { case live = "Live", progra
             }
         }
     }
-    func started(checks: [SlotCheck]) { for c in checks where c.canStart { slotProgram[c.slot] = c.sent } }
+    /// Recorded before the start, so the run is saved with its program however quickly its first reading arrives.
+    func willStart(checks: [SlotCheck]) { for c in checks where c.canStart { slotProgram[c.slot] = c.sent } }
+    func startFailed(checks: [SlotCheck]) { for c in checks where currentRun[c.slot] == nil { slotProgram[c.slot] = nil } }
 
     func analysis(of r: RunRecord) -> (samples: [Sample], analysis: RunAnalysis) {
-        let s = r.id == currentRun[r.slot] ? live[r.slot] : store.samples(run: r.id)
+        if r.id == currentRun[r.slot] { return (live[r.slot], liveAnalysis[r.slot] ?? Analysis.analyze(live[r.slot])) }
+        let s = store.samples(run: r.id)
         return (s, Analysis.analyze(s))
     }
     func assign(run: RunRecord, cell: Int64?) { store.assign(run: run.id, cell: cell); runs = store.runs() }
-    func delete(run: RunRecord) { store.delete(run: run.id); runs = store.runs() }
+    func delete(run: RunRecord) {
+        guard run.id != currentRun[run.slot] else { return } // A run still recording can't be deleted.
+        store.delete(run: run.id); runs = store.runs()
+    }
 
     /// A cell's latest complete discharge test, for the library and pack matching. A run that was stopped early isn't a capacity measurement.
     func latest(for c: Cell) -> RunRecord? { capacityTests(for: c).last }
