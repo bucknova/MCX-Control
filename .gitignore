@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+*.app
+*.csv
+*.sqlite*
+.DS_Store
+mc3000-run-logs/
