@@ -27,7 +27,7 @@ struct RunCharts: View {
         let p = chartPoints(samples)
         VStack(alignment: .leading, spacing: 10) {
             Picker("Chart", selection: $metric) { ForEach(["Voltage", "Current", "Temperature"], id: \.self) { Text($0) } }
-                .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 340)
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
             if p.isEmpty {
                 ContentUnavailableView("No readings yet", systemImage: "chart.xyaxis.line", description: Text("The chart fills in once a run starts.")).frame(maxWidth: .infinity, minHeight: height)
             } else {

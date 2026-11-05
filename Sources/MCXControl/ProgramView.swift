@@ -13,13 +13,11 @@ struct ProgramView: View {
         let p = model.draft
         Form {
             Section {
-                HStack {
-                    Picker("Battery type", selection: Binding(get: { model.draft.type }, set: { apply(type: $0) })) { ForEach(BatteryType.allCases.filter(\.canProgram)) { Text($0.name).tag($0) } }
-                    Picker("Mode", selection: Binding(get: { model.draft.mode }, set: { m in
-                        // Break-in has its own slow currents, so entering it starts from those. You can still change them.
-                        if m == .storageOrBreakIn && model.draft.type.isNickel { model.draft = Limits.suggested(type: model.draft.type, mode: m, rated: model.draftRated) } else { model.draft.mode = m }
-                    })) { ForEach(ChargeMode.allCases) { Text($0.name(for: model.draft.type)).tag($0) } }
-                }
+                Picker("Battery type", selection: Binding(get: { model.draft.type }, set: { apply(type: $0) })) { ForEach(BatteryType.allCases.filter(\.canProgram)) { Text($0.name).tag($0) } }
+                Picker("Mode", selection: Binding(get: { model.draft.mode }, set: { m in
+                    // Break-in has its own slow currents, so entering it starts from those. You can still change them.
+                    if m == .storageOrBreakIn && model.draft.type.isNickel { model.draft = Limits.suggested(type: model.draft.type, mode: m, rated: model.draftRated) } else { model.draft.mode = m }
+                })) { ForEach(ChargeMode.allCases) { Text($0.name(for: model.draft.type)).tag($0) } }
                 field("Rated capacity", value: $model.draftRated, unit: "mAh", hint: "1C = \(model.draftRated) mA")
                 HStack {
                     Text("Set currents").foregroundStyle(.secondary)
@@ -55,6 +53,7 @@ struct ProgramView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 14) {
                 Text("Send to").fontWeight(.medium)

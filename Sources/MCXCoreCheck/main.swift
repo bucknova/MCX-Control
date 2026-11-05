@@ -172,6 +172,14 @@ struct Analyzing {
         var s = [sample(0, 1, cap: 0), sample(100, 1, cap: 1)]; s[0].elapsed = 100; s[1].elapsed = 200; s[1].time = Date(timeIntervalSince1970: 8)
         expect(Analysis.analyze(s).coverage < 0.1)
     }
+    func energyAcrossConnectionChange() {
+        var s = (0...100).map { i -> Sample in var x = sample(Double(i) * 2, 1, mA: 1000, cap: Double(i)); x.millivolts = 1400; x.energy = i <= 50 ? i : nil; return x }
+        s[100].source = .bluetooth
+        let e = Analysis.analyze(s).phases[0].energyWattHours
+        expect(abs(e - 0.0778) < 0.002) // 1 A, 1.4 V, 200 s, not the 0.05 Wh the USB half reported
+        s = s.map { var x = $0; x.energy = Int($0.capacity); return x }
+        expect(Analysis.analyze(s).phases[0].energyWattHours == 0.1)
+    }
     func efficiencyNeedsBothDirections() {
         let s = [sample(0, 1, cap: 0, energy: 0), sample(2, 1, cap: 10, energy: 1000), sample(4, 2, cap: 0, energy: 0), sample(6, 2, cap: 9, energy: 800)]
         expect(Analysis.analyze(s).efficiency == 0.8)
@@ -216,6 +224,7 @@ run("Tracking.resumesAcrossRelaunch") { Tracking().resumesAcrossRelaunch() }
 run("Analyzing.capacitySurvivesPhaseResetAndStop") { Analyzing().capacitySurvivesPhaseResetAndStop() }
 run("Analyzing.gapsAreCountedAndNotIntegrated") { Analyzing().gapsAreCountedAndNotIntegrated() }
 run("Analyzing.joiningLateLowersCoverage") { Analyzing().joiningLateLowersCoverage() }
+run("Analyzing.energyAcrossConnectionChange") { Analyzing().energyAcrossConnectionChange() }
 run("Analyzing.efficiencyNeedsBothDirections") { Analyzing().efficiencyNeedsBothDirections() }
 run("Analyzing.downsamplingKeepsDips") { Analyzing().downsamplingKeepsDips() }
 run("Analyzing.packMatching") { Analyzing().packMatching() }

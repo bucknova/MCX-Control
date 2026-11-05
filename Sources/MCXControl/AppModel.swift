@@ -145,6 +145,7 @@ enum AppSection: String, CaseIterable, Identifiable { case live = "Live", progra
     func assign(run: RunRecord, cell: Int64?) { store.assign(run: run.id, cell: cell); runs = store.runs() }
     func delete(run: RunRecord) { store.delete(run: run.id); runs = store.runs() }
 
-    /// A cell's latest discharge test, for the library and pack matching.
-    func latest(for c: Cell) -> RunRecord? { store.runs(cell: c.id).last { ($0.dischargeCapacity ?? 0) > 0 && ($0.mode?.discharges ?? false) } }
+    /// A cell's latest complete discharge test, for the library and pack matching. A run that was stopped early isn't a capacity measurement.
+    func latest(for c: Cell) -> RunRecord? { capacityTests(for: c).last }
+    func capacityTests(for c: Cell) -> [RunRecord] { store.runs(cell: c.id).filter { ($0.dischargeCapacity ?? 0) > 0 && $0.endReason == "finished" } }
 }

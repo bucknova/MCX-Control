@@ -81,9 +81,11 @@ public enum Analysis {
                     wh += mA / 1000 * mV / 1000 * dt / 3600
                 }
             }
-            for s in group { if let e = s.energy { hasCharger = true; maxEnergy = max(maxEnergy, e); if firstEnergy == nil { firstEnergy = e } } }
-            // The charger's own energy counter is measured for the whole phase, so it wins over our estimate when it is present.
-            let energy = hasCharger ? Double(maxEnergy) / 1000 : wh
+            var allHaveCharger = true
+            for s in group { if let e = s.energy { hasCharger = true; maxEnergy = max(maxEnergy, e); if firstEnergy == nil { firstEnergy = e } } else { allHaveCharger = false } }
+            // The charger's energy counter only arrives over USB. If a phase changed connection partway, its last value
+            // covers only part of the phase, so the calculated figure is the better one.
+            let energy = hasCharger && allHaveCharger ? Double(maxEnergy) / 1000 : wh
             let volts = group.map(\.millivolts)
             let running = group.filter { $0.milliamps > 0 }
             let current = running.isEmpty ? 0 : running.map(\.milliamps).reduce(0, +) / running.count

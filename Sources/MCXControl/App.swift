@@ -24,7 +24,7 @@ struct RootView: View {
         HStack(spacing: 0) {
             SideNav()
             VStack(spacing: 0) {
-                TopBar()
+                TopBar().zIndex(1)
                 Group {
                     switch model.section {
                     case .live: LiveView()
@@ -35,6 +35,7 @@ struct RootView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped() // Forms and lists otherwise draw up under the title and toolbar.
                 .overlay(alignment: .top) { BannerView() } // Floats over the content, so a long message can never change the layout.
             }
         }
@@ -151,6 +152,8 @@ struct Metric: View {
 
 extension View {
     /// Readings sit on a solid surface; glass is for the controls above them.
+    /// The same surface without inner padding, for lists and tables that manage their own.
+    func listPanel() -> some View { scrollContentBackground(.hidden).background(Color(nsColor: .textBackgroundColor)).clipShape(.rect(cornerRadius: 14)).overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.08))) }
     func panel() -> some View { padding(16).background(Color(nsColor: .textBackgroundColor), in: .rect(cornerRadius: 14)).overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.08))) }
 }
 

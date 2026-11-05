@@ -31,11 +31,14 @@ struct CellsView: View {
                     if let h = r.health { Text(h.rawValue).font(.caption.weight(.semibold)).foregroundStyle(.white).padding(.horizontal, 8).padding(.vertical, 1).background(h == .good ? Color.green : h == .watch ? .orange : .red, in: .capsule) } else { Text("Not tested").foregroundStyle(.secondary) }
                 }
             }
-            .frame(minHeight: 240)
+            .alternatingRowBackgrounds(.disabled)
+            .listPanel()
+            .frame(minHeight: 180, idealHeight: 240, maxHeight: 300)
             if let c = model.cells.first(where: { $0.id == selection }) { CellTrends(cell: c) }
             else { Text(model.cells.isEmpty ? "Add a cell to start tracking its history." : "Select a cell to see its trends.").foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 80) }
+            Spacer(minLength: 0)
         }
-        .padding(16)
+        .padding([.horizontal, .bottom], 16)
         .sheet(isPresented: $showAdd) { AddCell().environment(model) }
     }
 }
@@ -44,16 +47,19 @@ struct CellTrends: View {
     @Environment(AppModel.self) private var model
     let cell: Cell
     var body: some View {
-        let tests = model.store.runs(cell: cell.id).filter { ($0.dischargeCapacity ?? 0) > 0 }
+        let tests = model.capacityTests(for: cell)
         VStack(alignment: .leading, spacing: 12) {
             Text("\(cell.label) over \(tests.count) discharge test\(tests.count == 1 ? "" : "s")").font(.headline)
-            if tests.isEmpty { Text("No completed discharge tests yet.").foregroundStyle(.secondary) } else {
+            if tests.isEmpty { Text("No completed discharge tests yet. Runs stopped early don't count.").foregroundStyle(.secondary) }
+            else if tests.count == 1 { Text(String(format: "One test so far: %.0f mAh%@. Trends appear after the second test.", tests[0].dischargeCapacity ?? 0, tests[0].resistance.map { ", \($0) mΩ" } ?? "")).foregroundStyle(.secondary) }
+            else {
                 HStack(spacing: 20) {
                     trend("Capacity", unit: "mAh", tests.enumerated().map { ($0.offset + 1, $0.element.dischargeCapacity ?? 0) }, .orange)
                     trend("Internal resistance", unit: "mΩ", tests.enumerated().compactMap { i, r in r.resistance.map { (i + 1, Double($0)) } }, .secondary)
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .panel()
     }
     private func trend(_ title: String, unit: String, _ pts: [(Int, Double)], _ c: Color) -> some View {
@@ -113,7 +119,7 @@ struct MatchView: View {
                     Text("\(tested.count) tested").foregroundStyle(.secondary)
                 }
                 if matches.isEmpty {
-                    ContentUnavailableView("Not enough tested cells", systemImage: "square.grid.2x2", description: Text("A pack of \(size) needs \(size) cells with a completed discharge test.")).frame(minHeight: 300)
+                    ContentUnavailableView("Not enough tested cells", systemImage: "square.grid.2x2", description: Text("A pack of \(size) needs \(size) cells with a completed discharge test.")).frame(maxWidth: .infinity, minHeight: 300)
                 }
                 ForEach(Array(matches.enumerated()), id: \.offset) { i, m in
                     VStack(alignment: .leading, spacing: 12) {

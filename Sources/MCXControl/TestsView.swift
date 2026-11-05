@@ -7,7 +7,7 @@ struct TestsView: View {
     @Environment(AppModel.self) private var model
     @Local private var selection: Int64?
     var body: some View {
-        HSplitView {
+        HStack(alignment: .top, spacing: 16) {
             List(model.runs, selection: $selection) { r in
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
@@ -19,13 +19,15 @@ struct TestsView: View {
                 }
                 .tag(r.id)
             }
-            .frame(minWidth: 270, idealWidth: 300, maxWidth: 380)
+            .listPanel()
+            .frame(width: 300)
             Group {
                 if let r = model.runs.first(where: { $0.id == selection }) { RunReport(run: r).id(r.id) }
                 else { ContentUnavailableView("Select a test", systemImage: "list.bullet.rectangle", description: Text(model.runs.isEmpty ? "Tests appear here once the charger runs one." : "Choose one from the list.")) }
             }
             .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
         }
+        .padding([.horizontal, .bottom], 16)
     }
     private func capText(_ r: RunRecord) -> String {
         if let d = r.dischargeCapacity, d > 0 { return String(format: "%.0f mAh", d) }
@@ -86,9 +88,10 @@ struct RunReport: View {
                             }.monospacedDigit()
                         }
                     }
-                }.panel()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .panel()
             }
-            .padding(16)
         }
     }
     private func subtitle(_ a: RunAnalysis) -> String {
