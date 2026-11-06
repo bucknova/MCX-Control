@@ -66,13 +66,13 @@ struct RunReport: View {
                             if let d = a.dischargeCapacity {
                                 Metric(title: "Discharge capacity", value: String(format: "%.0f mAh", d), note: rated > 0 ? String(format: "%.1f%% of rated", d / Double(rated) * 100) : nil)
                             } else { Metric(title: "Charge capacity", value: String(format: "%.0f mAh", a.chargeCapacity)) }
-                            Metric(title: a.dischargeCapacity != nil ? "Energy out" : "Energy in", value: String(format: "%.2f Wh", a.dischargeCapacity != nil ? a.dischargeEnergy : a.chargeEnergy))
-                            Metric(title: "Energy efficiency", value: a.efficiency.map { String(format: "%.1f%%", $0 * 100) } ?? "–")
+                            Metric(title: a.dischargeCapacity != nil ? "Energy out" : "Energy in", value: String(format: "%.2f Wh", a.dischargeCapacity != nil ? a.dischargeEnergy : a.chargeEnergy), note: a.phases.filter { $0.kind == .discharge }.count > 1 ? "All discharges" : nil)
+                            Metric(title: "Energy efficiency", value: a.efficiency.map { String(format: "%.1f%%", $0 * 100) } ?? "–", note: a.efficiency != nil ? "Last charge and discharge" : a.dischargeCapacity != nil ? "Needs discharge, charge, discharge" : nil)
                             Metric(title: "Internal resistance", value: a.internalResistance.map { "\($0) mΩ" } ?? "–")
                             Metric(title: "Data coverage", value: String(format: "%.1f%%", a.coverage * 100), note: a.gapCount > 0 ? "\(a.gapCount) gap\(a.gapCount == 1 ? "" : "s"), \(Format.clock(Int(a.gapSeconds)))" : (run.joinedAt > 5 ? "Joined at \(Format.clock(run.joinedAt))" : nil), noteColor: .orange)
                         }
                     }
-                    RunCharts(samples: samples, height: 260)
+                    RunCharts(samples: samples, height: 340)
                 }.panel()
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Phases").font(.headline)

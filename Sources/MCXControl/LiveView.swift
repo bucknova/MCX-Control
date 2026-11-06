@@ -79,7 +79,7 @@ struct SlotDetail: View {
                     }
                 }
             }
-            RunCharts(samples: samples, height: 260).equatable()
+            RunCharts(samples: samples, height: 340).equatable()
         }
         .panel()
     }

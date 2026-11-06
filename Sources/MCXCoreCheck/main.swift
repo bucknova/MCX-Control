@@ -254,9 +254,24 @@ struct Analyzing {
         expect(Analysis.analyze(s).phases[0].energyWattHours == 0.1)
     }
     func efficiencyNeedsBothDirections() {
-        let s = [sample(0, 1, cap: 0, energy: 0), sample(2, 1, cap: 10, energy: 1000), sample(4, 2, cap: 0, energy: 0), sample(6, 2, cap: 9, energy: 800)]
-        expect(Analysis.analyze(s).efficiency == 0.8)
-        expect(Analysis.analyze(Array(s[0..<2])).efficiency == nil)
+        func c(_ t: Double, _ wh: Int) -> [Sample] { [sample(t, 1, cap: 0, energy: 0), sample(t + 1, 1, cap: 10, energy: wh)] }
+        func d(_ t: Double, _ wh: Int) -> [Sample] { [sample(t, 2, cap: 0, energy: 0), sample(t + 1, 2, cap: 9, energy: wh)] }
+        let done = [sample(90, 4, mA: 0, cap: 9)]
+        func eff(_ s: [Sample]) -> Double? { Analysis.analyze(s).efficiency }
+        // One direction only, or a charge with nothing known about how full the cell was.
+        expect(eff(c(0, 1000)) == nil)
+        expect(eff(c(0, 500) + d(10, 800) + done) == nil)
+        // Discharge, charge, discharge is a real round trip.
+        expect(eff(d(0, 900) + c(10, 1000) + d(20, 800) + done) == 0.8)
+        // Charge > Discharge cycles: the first charge is only a top-up, and 124% is what counting it gave.
+        expect(eff(c(0, 981) + d(10, 2928) + c(20, 3715) + d(30, 2924) + done) == 2924.0 / 3715.0)
+        // Rests in between change nothing.
+        let rest = [sample(15, 3, mA: 0, cap: 0)], rest2 = [sample(25, 3, mA: 0, cap: 0)]
+        expect(eff(d(0, 900) + rest + c(16, 1000) + rest2 + d(26, 800) + done) == 0.8)
+        // A stopped or faulted last discharge falls back to the last finished pair, or to nothing.
+        expect(eff(d(0, 900) + c(10, 1000) + d(20, 100)) == nil)
+        expect(eff(d(0, 900) + c(10, 1000) + d(20, 100) + [sample(30, 130, mA: 0, cap: 0)]) == nil)
+        expect(eff(d(0, 900) + c(10, 1000) + d(20, 800) + c(30, 1000) + d(40, 100)) == 0.8)
     }
     func downsamplingKeepsDips() {
         var s = (0..<1000).map { sample(Double($0), 1, mA: 2450, cap: 0) }; s[500].milliamps = 300
@@ -266,6 +281,21 @@ struct Analyzing {
         let dips = (0..<30000).map { i in sample(Double(i), 1, mA: i % 20 == 0 ? 300 : 2450, cap: 0) }
         let e = Analysis.downsample(dips, max: 100); expect(e.filter { $0.milliamps == 2450 }.count >= 40)
         expect(zip(e, e.dropFirst()).allSatisfy { $0.time <= $1.time })
+    }
+    func chartLineStaysWhole() {
+        // Thinned points of a long run sit far apart, and that alone must not break the line.
+        let long = (0..<30000).map { sample(Double($0), $0 < 15000 ? 1 : 2, mA: 1000, cap: 0) }
+        let c = Analysis.chartSegments(long, max: 1500)
+        expect(c.count <= 1500); expect(Set(c.map(\.segment)).count == 2)
+        // A real gap still breaks it, including one too short to see between thinned points.
+        let gapped = (0..<30000).map { sample(Double($0) + ($0 >= 20000 ? 15 : 0), 1, mA: 1000, cap: 0) }
+        expect(Set(Analysis.chartSegments(gapped, max: 1500).map(\.segment)).count == 2)
+        expect(Set(Analysis.chartSegments(gapped, max: 40000).map(\.segment)).count == 2)
+        // A gap before the first thinned point breaks nothing.
+        var early = (0..<200).map { sample(Double($0) + ($0 > 0 ? 20 : 0), 1, mA: 1000, cap: 0) }
+        early[5].milliamps = 500; early[6].milliamps = 1500
+        expect(Set(Analysis.chartSegments(early, max: 10).map(\.segment)).count == 1)
+        expect(Analysis.chartSegments([], max: 100).isEmpty)
     }
     func packMatching() {
         let c = [("E-01", 1902.0, 29), ("E-02", 1894, 31), ("E-03", 1842, 34), ("E-04", 1889, 30), ("E-05", 1776, 47), ("E-06", 1851, 33), ("E-07", 1648, 68), ("E-08", 1897, 30)].enumerated().map { Analysis.MatchCell(id: Int64($0.offset), label: $0.element.0, capacity: $0.element.1, resistance: $0.element.2) }
@@ -314,6 +344,7 @@ run("Analyzing.joiningLateLowersCoverage") { Analyzing().joiningLateLowersCovera
 run("Analyzing.energyAcrossConnectionChange") { Analyzing().energyAcrossConnectionChange() }
 run("Analyzing.efficiencyNeedsBothDirections") { Analyzing().efficiencyNeedsBothDirections() }
 run("Analyzing.downsamplingKeepsDips") { Analyzing().downsamplingKeepsDips() }
+run("Analyzing.chartLineStaysWhole") { Analyzing().chartLineStaysWhole() }
 run("Analyzing.packMatching") { Analyzing().packMatching() }
 run("Analyzing.csvHasEveryRow") { Analyzing().csvHasEveryRow() }
 print("\(checks) checks, \(failures) failures")

@@ -34,6 +34,8 @@ public struct Phase: Equatable, Identifiable, Sendable {
     public let voltageRange: ClosedRange<Int>
     public let peakTemperature: Double
     public let internalResistance: Int?
+    /// The charger moved on by itself, so the phase ran its full length rather than being stopped or faulting.
+    public let finished: Bool
     public var duration: TimeInterval { end.timeIntervalSince(start) }
     public var id: Date { start }
 }
@@ -47,12 +49,17 @@ public struct RunAnalysis: Equatable, Sendable {
     public var dischargeCapacity: Double? { phases.last { $0.kind == .discharge }?.chargerCapacity }
     public var chargeEnergy: Double { phases.filter { $0.kind == .charge }.map(\.energyWattHours).reduce(0, +) }
     public var dischargeEnergy: Double { phases.filter { $0.kind == .discharge }.map(\.energyWattHours).reduce(0, +) }
-    /// Only meaningful with both directions; a cell's first charge isn't necessarily what came out.
+    /// Energy out of the last finished discharge over the charge just before it. That charge only counts when a
+    /// finished discharge came first: otherwise the cell may have started part full and given back more than it took.
     public var efficiency: Double? {
-        guard let first = phases.firstIndex(where: { $0.kind == .charge }), let disch = phases.lastIndex(where: { $0.kind == .discharge }), first < disch, chargeEnergy > 0 else { return nil }
-        let inEnergy = phases[first...disch].filter { $0.kind == .charge }.map(\.energyWattHours).reduce(0, +)
-        let outEnergy = phases[first...disch].filter { $0.kind == .discharge }.map(\.energyWattHours).reduce(0, +)
-        return inEnergy > 0 ? outEnergy / inEnergy : nil
+        let active = phases.filter { $0.kind != .rest }
+        guard active.count >= 3 else { return nil }
+        for i in stride(from: active.count - 1, through: 2, by: -1) {
+            let (emptied, charge, out) = (active[i - 2], active[i - 1], active[i])
+            guard emptied.kind == .discharge, charge.kind == .charge, out.kind == .discharge, emptied.finished, charge.finished, out.finished, charge.energyWattHours > 0 else { continue }
+            return out.energyWattHours / charge.energyWattHours
+        }
+        return nil
     }
     public var internalResistance: Int? { phases.reversed().compactMap(\.internalResistance).first }
 }
@@ -67,7 +74,7 @@ public enum Analysis {
         var gap = 0.0, gaps = 0
         var group: [Sample] = []
         func kind(_ s: UInt8) -> Phase.Kind? { s == 1 ? .charge : s == 2 ? .discharge : s == 3 ? .rest : nil }
-        func flush() {
+        func flush(next: UInt8? = nil) {
             guard let f = group.first, let l = group.last, let k = kind(f.status) else { group = []; return }
             var calc = 0.0, wh = 0.0
             for (a, b) in zip(group, group.dropFirst()) {
@@ -86,11 +93,11 @@ public enum Analysis {
             let volts = group.map(\.millivolts)
             let running = group.filter { $0.milliamps > 0 }
             let current = running.isEmpty ? 0 : running.map(\.milliamps).reduce(0, +) / running.count
-            phases.append(Phase(kind: k, start: f.time, end: l.time, chargerCapacity: group.map(\.capacity).max() ?? 0, calculatedCapacity: calc, energyWattHours: k == .rest ? 0 : energy, averageCurrent: current, voltageRange: (volts.min() ?? 0)...(volts.max() ?? 0), peakTemperature: group.map(\.temperature).max() ?? 0, internalResistance: group.last { $0.internalResistance != nil }?.internalResistance))
+            phases.append(Phase(kind: k, start: f.time, end: l.time, chargerCapacity: group.map(\.capacity).max() ?? 0, calculatedCapacity: calc, energyWattHours: k == .rest ? 0 : energy, averageCurrent: current, voltageRange: (volts.min() ?? 0)...(volts.max() ?? 0), peakTemperature: group.map(\.temperature).max() ?? 0, internalResistance: group.last { $0.internalResistance != nil }?.internalResistance, finished: next.map { (1...4).contains($0) } ?? false))
             group = []
         }
         for s in samples {
-            if let last = group.last, last.status != s.status { flush() }
+            if let last = group.last, last.status != s.status { flush(next: s.status) }
             if kind(s.status) != nil { group.append(s) } else { flush() }
         }
         flush()
@@ -117,6 +124,26 @@ public enum Analysis {
             let part = s[a..<b]
             guard let lo = part.min(by: { $0.milliamps < $1.milliamps }), let hi = part.max(by: { $0.milliamps < $1.milliamps }) else { continue }
             if lo == hi { out.append(lo) } else { out += lo.time < hi.time ? [lo, hi] : [hi, lo] }
+        }
+        return out
+    }
+
+    /// Thins readings for a chart and numbers each unbroken stretch of line. Gaps are judged on the full
+    /// readings, because thinned points of a long run are always further apart than `gapThreshold`.
+    public static func chartSegments(_ s: [Sample], max n: Int) -> [(sample: Sample, segment: Int)] {
+        let thin = downsample(s, max: n)
+        let gapEnds = zip(s, s.dropFirst()).filter { $1.time.timeIntervalSince($0.time) > gapThreshold }.map { $0.1.time }
+        var next = 0, segment = 0
+        var out: [(sample: Sample, segment: Int)] = []
+        out.reserveCapacity(thin.count)
+        for (i, x) in thin.enumerated() {
+            var gap = false
+            while next < gapEnds.count, gapEnds[next] <= x.time {
+                if i > 0, gapEnds[next] > thin[i - 1].time { gap = true }
+                next += 1
+            }
+            if i > 0, gap || x.status != thin[i - 1].status { segment += 1 }
+            out.append((x, segment))
         }
         return out
     }
