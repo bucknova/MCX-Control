@@ -10,6 +10,8 @@ public struct RunRecord: Identifiable, Equatable, Sendable, Hashable {
     public var id: Int64; public var slot: Int; public var cellID: Int64?; public var rawType: UInt8; public var rawMode: UInt8; public var program: Program?
     public var started: Date; public var ended: Date?; public var endStatus: UInt8?; public var endReason: String?; public var joinedAt: Int
     public var chargeCapacity: Double?; public var dischargeCapacity: Double?; public var chargeEnergy: Double?; public var dischargeEnergy: Double?; public var resistance: Int?; public var coverage: Double?; public var gapSeconds: Double?
+    /// Set when a run is recorded as stopped. Runs saved before this was tracked have none.
+    public var stop: StopRecord?
     public var type: BatteryType? { BatteryType(rawValue: rawType) }
     public var mode: ChargeMode? { ChargeMode(rawValue: rawMode) }
 }
@@ -35,6 +37,9 @@ public final class Store {
         CREATE INDEX IF NOT EXISTS samples_run ON samples(run_id, time);
         CREATE TABLE IF NOT EXISTS presets(name TEXT PRIMARY KEY, rated INTEGER NOT NULL, program TEXT NOT NULL);
         """)
+        var columns = Set<String>()
+        run("PRAGMA table_info(runs)") { columns.insert(self.optText($0, 1) ?? "") }
+        for (name, kind) in [("stop_source", "TEXT"), ("stop_requested", "REAL")] where !columns.contains(name) { try exec("ALTER TABLE runs ADD COLUMN \(name) \(kind)") }
     }
     deinit { sqlite3_close(db) }
 
@@ -92,14 +97,16 @@ public final class Store {
     public func append(run id: Int64, _ s: Sample) {
         run("INSERT INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", [.i(id), .d(s.time.timeIntervalSince1970), .i(Int64(s.cycle)), .i(Int64(s.status)), .i(Int64(s.elapsed)), .i(Int64(s.millivolts)), v(s.loadedMillivolts), .i(Int64(s.milliamps)), .d(s.capacity), .d(s.temperature), v(s.internalResistance), v(s.energy), .s(s.source.rawValue)])
     }
-    public func finish(run id: Int64, status: UInt8, reason: String, at: Date, analysis a: RunAnalysis) {
-        run("UPDATE runs SET ended=?,end_status=?,end_reason=?,charge_cap=?,discharge_cap=?,charge_wh=?,discharge_wh=?,ir=?,coverage=?,gap_s=? WHERE id=?", [.d(at.timeIntervalSince1970), .i(Int64(status)), .s(reason), .d(a.chargeCapacity), v(a.dischargeCapacity), .d(a.chargeEnergy), .d(a.dischargeEnergy), v(a.internalResistance), .d(a.coverage), .d(a.gapSeconds), .i(id)])
+    /// Saved as the command goes out, so it survives the app quitting before the charger's response is seen.
+    public func noteStop(run id: Int64, _ s: StopRecord) { run("UPDATE runs SET stop_source=?,stop_requested=? WHERE id=?", [.s(s.source.rawValue), v(s.time?.timeIntervalSince1970), .i(id)]) }
+    public func finish(run id: Int64, status: UInt8, reason: String, at: Date, analysis a: RunAnalysis, stop: StopRecord? = nil) {
+        run("UPDATE runs SET ended=?,end_status=?,end_reason=?,charge_cap=?,discharge_cap=?,charge_wh=?,discharge_wh=?,ir=?,coverage=?,gap_s=?,stop_source=?,stop_requested=? WHERE id=?", [.d(at.timeIntervalSince1970), .i(Int64(status)), .s(reason), .d(a.chargeCapacity), v(a.dischargeCapacity), .d(a.chargeEnergy), .d(a.dischargeEnergy), v(a.internalResistance), .d(a.coverage), .d(a.gapSeconds), v(stop?.source.rawValue), v(stop?.time?.timeIntervalSince1970), .i(id)])
     }
     public func assign(run id: Int64, cell: Int64?) { run("UPDATE runs SET cell_id=? WHERE id=?", [v(cell), .i(id)]) }
     public func delete(run id: Int64) { run("DELETE FROM runs WHERE id=?", [.i(id)]) }
-    private let runColumns = "id,slot,cell_id,type,mode,program,started,ended,end_status,end_reason,joined_at,charge_cap,discharge_cap,charge_wh,discharge_wh,ir,coverage,gap_s"
+    private let runColumns = "id,slot,cell_id,type,mode,program,started,ended,end_status,end_reason,joined_at,charge_cap,discharge_cap,charge_wh,discharge_wh,ir,coverage,gap_s,stop_source,stop_requested"
     private func runRow(_ st: OpaquePointer) -> RunRecord {
-        RunRecord(id: sqlite3_column_int64(st, 0), slot: Int(sqlite3_column_int(st, 1)), cellID: optInt(st, 2).map(Int64.init), rawType: UInt8(sqlite3_column_int(st, 3)), rawMode: UInt8(sqlite3_column_int(st, 4)), program: program(optText(st, 5)), started: Date(timeIntervalSince1970: sqlite3_column_double(st, 6)), ended: optDouble(st, 7).map { Date(timeIntervalSince1970: $0) }, endStatus: optInt(st, 8).map { UInt8($0) }, endReason: optText(st, 9), joinedAt: Int(sqlite3_column_int(st, 10)), chargeCapacity: optDouble(st, 11), dischargeCapacity: optDouble(st, 12), chargeEnergy: optDouble(st, 13), dischargeEnergy: optDouble(st, 14), resistance: optInt(st, 15), coverage: optDouble(st, 16), gapSeconds: optDouble(st, 17))
+        RunRecord(id: sqlite3_column_int64(st, 0), slot: Int(sqlite3_column_int(st, 1)), cellID: optInt(st, 2).map(Int64.init), rawType: UInt8(sqlite3_column_int(st, 3)), rawMode: UInt8(sqlite3_column_int(st, 4)), program: program(optText(st, 5)), started: Date(timeIntervalSince1970: sqlite3_column_double(st, 6)), ended: optDouble(st, 7).map { Date(timeIntervalSince1970: $0) }, endStatus: optInt(st, 8).map { UInt8($0) }, endReason: optText(st, 9), joinedAt: Int(sqlite3_column_int(st, 10)), chargeCapacity: optDouble(st, 11), dischargeCapacity: optDouble(st, 12), chargeEnergy: optDouble(st, 13), dischargeEnergy: optDouble(st, 14), resistance: optInt(st, 15), coverage: optDouble(st, 16), gapSeconds: optDouble(st, 17), stop: optText(st, 18).flatMap(StopSource.init(rawValue:)).map { StopRecord(source: $0, time: optDouble(st, 19).map { Date(timeIntervalSince1970: $0) }) })
     }
     public func runs(limit: Int = 500) -> [RunRecord] {
         var o: [RunRecord] = []; run("SELECT \(runColumns) FROM runs ORDER BY started DESC LIMIT ?", [.i(Int64(limit))]) { o.append(self.runRow($0)) }; return o

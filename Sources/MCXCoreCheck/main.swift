@@ -5,6 +5,7 @@ struct Missing: Error {}
 func need<T>(_ v: T?) throws -> T { guard let v else { throw Missing() }; return v }
 import Foundation
 import MCXCore
+import SQLite3
 
 func bytes(_ s: String) -> [UInt8] { s.split(separator: " ").compactMap { UInt8($0, radix: 16) } }
 func pad(_ a: [UInt8], _ n: Int) -> [UInt8] { a + [UInt8](repeating: 0, count: max(0, n - a.count)) }
@@ -182,6 +183,48 @@ struct Tracking {
     func resumesAcrossRelaunch() { var t = RunTracker(resuming: .init(type: 3, mode: 0, lastElapsed: 100)); expect(t.ingest(reading(1, t: 140)) == [.sample]) }
 }
 
+struct StopRecording {
+    let sent = Date(timeIntervalSince1970: 1000)
+    func commandGetsCredit() {
+        let c = StopRecord(source: .stopAll, time: sent)
+        expect(StopRecord.attribute(command: c, lastActive: sent.addingTimeInterval(3)) == c)
+        expect(StopRecord.attribute(command: c, lastActive: sent.addingTimeInterval(-600)) == c) // Connection dropped first.
+        expect(StopRecord.attribute(command: c, lastActive: nil) == c)
+    }
+    func noCommandIsSaidPlainly() { expect(StopRecord.attribute(command: nil, lastActive: sent) == StopRecord(source: .outsideApp, time: nil)) }
+    func aRunThatCarriedOnIsNotCredited() {
+        let c = StopRecord(source: .slotStop, time: sent)
+        expect(StopRecord.attribute(command: c, lastActive: sent.addingTimeInterval(31)) == StopRecord(source: .outsideApp, time: nil))
+    }
+    func tempDatabase() -> String { NSTemporaryDirectory() + "mcx-check-\(UUID().uuidString).sqlite" }
+    func savedAndClearedWithTheRun() throws {
+        let store = try Store(path: ":memory:")
+        let id = try need(store.createRun(slot: 1, cellID: nil, type: 3, mode: 0, program: nil, started: sent, joinedAt: 0))
+        let c = StopRecord(source: .safety, time: sent)
+        store.noteStop(run: id, c)
+        expect(store.openRun(slot: 1)?.stop == c) // Survives a relaunch before the run ends.
+        store.finish(run: id, status: 0, reason: "stopped", at: sent, analysis: Analysis.analyze([]), stop: StopRecord(source: .outsideApp, time: nil))
+        expect(store.runs().first?.stop == StopRecord(source: .outsideApp, time: nil))
+        let other = try need(store.createRun(slot: 2, cellID: nil, type: 3, mode: 0, program: nil, started: sent, joinedAt: 0))
+        store.noteStop(run: other, c)
+        store.finish(run: other, status: 128, reason: "finished", at: sent, analysis: Analysis.analyze([]))
+        expect(store.runs().first { $0.id == other }?.stop == nil)
+    }
+    func olderDatabasesUpgrade() throws {
+        let path = tempDatabase()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        var db: OpaquePointer?
+        expect(sqlite3_open(path, &db) == SQLITE_OK)
+        let old = "CREATE TABLE runs(id INTEGER PRIMARY KEY, slot INTEGER NOT NULL, cell_id INTEGER, type INTEGER NOT NULL, mode INTEGER NOT NULL, program TEXT, started REAL NOT NULL, ended REAL, end_status INTEGER, end_reason TEXT, joined_at INTEGER NOT NULL DEFAULT 0, charge_cap REAL, discharge_cap REAL, charge_wh REAL, discharge_wh REAL, ir INTEGER, coverage REAL, gap_s REAL); INSERT INTO runs(slot,type,mode,started,ended,end_reason) VALUES(1,3,0,1000,2000,'stopped');"
+        expect(sqlite3_exec(db, old, nil, nil, nil) == SQLITE_OK)
+        sqlite3_close(db)
+        for _ in 0..<2 { // The second open finds the columns already there.
+            let store = try Store(path: path)
+            expect(store.runs().count == 1); expect(store.runs().first?.endReason == "stopped"); expect(store.runs().first?.stop == nil)
+        }
+    }
+}
+
 struct Analyzing {
     func sample(_ t: Double, _ st: UInt8, mA: Int = 1000, cap: Double, energy: Int? = nil) -> Sample {
         Sample(time: Date(timeIntervalSince1970: t), cycle: 0, status: st, elapsed: Int(t), millivolts: 1400, loadedMillivolts: nil, milliamps: mA, capacity: cap, temperature: 26, internalResistance: 30, energy: energy, source: .usb)
@@ -260,6 +303,11 @@ run("Tracking.aTransientFaultDoesNotEndARun") { Tracking().aTransientFaultDoesNo
 run("Tracking.sustainedCutoffsAreClassified") { Tracking().sustainedCutoffsAreClassified() }
 run("Tracking.stoppingIsDebounced") { Tracking().stoppingIsDebounced() }
 run("Tracking.resumesAcrossRelaunch") { Tracking().resumesAcrossRelaunch() }
+run("StopRecording.commandGetsCredit") { StopRecording().commandGetsCredit() }
+run("StopRecording.noCommandIsSaidPlainly") { StopRecording().noCommandIsSaidPlainly() }
+run("StopRecording.aRunThatCarriedOnIsNotCredited") { StopRecording().aRunThatCarriedOnIsNotCredited() }
+run("StopRecording.savedAndClearedWithTheRun") { try StopRecording().savedAndClearedWithTheRun() }
+run("StopRecording.olderDatabasesUpgrade") { try StopRecording().olderDatabasesUpgrade() }
 run("Analyzing.capacitySurvivesPhaseResetAndStop") { Analyzing().capacitySurvivesPhaseResetAndStop() }
 run("Analyzing.gapsAreCountedAndNotIntegrated") { Analyzing().gapsAreCountedAndNotIntegrated() }
 run("Analyzing.joiningLateLowersCoverage") { Analyzing().joiningLateLowersCoverage() }

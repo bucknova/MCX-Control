@@ -26,7 +26,7 @@ The app's limit checks are the main protection against bad values, and they can 
 - **Check before start:** over USB, every field is read back and compared before a slot can start.
 - **Test history:** per-phase reports, data coverage, marked connection gaps and CSV export.
 - **Cell library** with capacity and resistance trends, plus **pack matching**.
-- **Stop controls:** Stop all slots (⌘.) and per-slot stop.
+- **Stop controls:** Stop all slots and per-slot stop. Each stopped test records what stopped it: the button, the safety stop or no command from this app, which points to the charger or something else.
 - **Mac notifications** for finished runs, faults and lost connections.
 
 ## Tested with
