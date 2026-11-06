@@ -6,15 +6,10 @@ struct ChartPoint: Identifiable { let id: Int; let minutes: Double; let volts: D
 
 func chartPoints(_ raw: [Sample]) -> [ChartPoint] {
     guard let t0 = raw.first?.time else { return [] }
-    let s = Analysis.downsample(raw, max: 1500)
-    var seg = 0
-    var out: [ChartPoint] = []
-    for (i, x) in s.enumerated() {
-        // A new segment leaves a visible break across a recording gap and colors each phase separately.
-        if i > 0, x.time.timeIntervalSince(s[i - 1].time) > Analysis.gapThreshold || x.status != s[i - 1].status { seg += 1 }
-        out.append(ChartPoint(id: i, minutes: x.time.timeIntervalSince(t0) / 60, volts: Double(x.millivolts) / 1000, amps: Double(x.milliamps) / 1000, temp: x.temperature, segment: "\(seg)", status: x.status))
+    return Analysis.chartSegments(raw, max: 1500).enumerated().map { i, p in
+        let x = p.sample
+        return ChartPoint(id: i, minutes: x.time.timeIntervalSince(t0) / 60, volts: Double(x.millivolts) / 1000, amps: Double(x.milliamps) / 1000, temp: x.temperature, segment: "\(p.segment)", status: x.status)
     }
-    return out
 }
 
 private func phaseColor(_ s: UInt8) -> Color { s == 1 ? .blue : s == 2 ? .orange : .gray }
@@ -33,17 +28,35 @@ struct RunCharts: View, Equatable {
             if p.isEmpty {
                 ContentUnavailableView("No readings yet", systemImage: "chart.xyaxis.line", description: Text("The chart fills in once a run starts.")).frame(maxWidth: .infinity, minHeight: height)
             } else {
+                // Long runs read better in hours than in hundreds of minutes.
+                let inHours = (p.last?.minutes ?? 0) >= 120
                 Chart(p) { x in
-                    LineMark(x: .value("Minutes", x.minutes), y: .value(metric, value(x)), series: .value("Segment", x.segment))
-                        .foregroundStyle(metric == "Voltage" ? phaseColor(x.status) : metric == "Current" ? Color.secondary : Color.red)
-                        .lineStyle(.init(lineWidth: metric == "Current" ? 1 : 2))
+                    LineMark(x: .value(inHours ? "Hours" : "Minutes", inHours ? x.minutes / 60 : x.minutes), y: .value(metric, value(x)), series: .value("Segment", x.segment))
+                        .foregroundStyle(phaseColor(x.status))
+                        // The charger's pulsed charge current packs the line tight, so a thin one keeps it from filling in solid.
+                        .lineStyle(.init(lineWidth: metric == "Current" ? 0.75 : 2))
                 }
+                .chartXAxis { AxisMarks(values: .automatic(desiredCount: 10)) }
                 .chartYScale(domain: .automatic(includesZero: metric == "Current"))
                 .chartYAxisLabel(metric == "Voltage" ? "V" : metric == "Current" ? "A" : "°C")
-                .chartXAxisLabel("Minutes")
+                .chartXAxisLabel(inHours ? "Hours" : "Minutes")
                 .frame(height: height)
+                HStack(spacing: 14) {
+                    ForEach(legend(p), id: \.0) { name, color in
+                        HStack(spacing: 5) { Capsule().fill(color).frame(width: 14, height: 3); Text(name) }
+                    }
+                }
+                .font(.callout).foregroundStyle(.secondary)
             }
         }
+    }
+    private func legend(_ p: [ChartPoint]) -> [(String, Color)] {
+        let seen = Set(p.map(\.status))
+        var out: [(String, Color)] = []
+        if seen.contains(1) { out.append(("Charge", phaseColor(1))) }
+        if seen.contains(2) { out.append(("Discharge", phaseColor(2))) }
+        if !seen.subtracting([1, 2]).isEmpty { out.append(("Rest or done", phaseColor(0))) }
+        return out
     }
     private func value(_ x: ChartPoint) -> Double { metric == "Voltage" ? x.volts : metric == "Current" ? x.amps : x.temp }
 }
