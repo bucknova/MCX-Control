@@ -40,6 +40,8 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
 
     @ObservationIgnored var onReading: ((SlotReading, Date) -> Void)?
     @ObservationIgnored var onSafetyStop: ((Int, String) -> Void)?
+    /// Called before each stop goes out, so every run can record what stopped it.
+    @ObservationIgnored var onStopCommand: (([Int], StopSource) -> Void)?
 
     @ObservationIgnored private let usb = USBLink()
     @ObservationIgnored private let ble = BluetoothLink()
@@ -187,7 +189,8 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
 
     // MARK: Stop
     /// Immediate: the command goes out first, without waiting its turn, and the turn is only for confirming it worked.
-    @discardableResult func stopAll() async -> Bool {
+    @discardableResult func stopAll(source: StopSource = .stopAll) async -> Bool {
+        onStopCommand?(Array(0..<4), source)
         if ble.isConnected { ble.sendNow(Wire.bleStopAll) } else if usb.present { usb.send(Wire.usbStopAll) }
         return await hold {
             var ok = false
@@ -220,8 +223,9 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
 
     enum StopResult { case stopped, failed, needsBluetooth }
     /// Single-slot stop only exists over Bluetooth.
-    func stop(slot s: Int) async -> StopResult {
-        await hold {
+    func stop(slot s: Int, source: StopSource = .slotStop) async -> StopResult {
+        onStopCommand?([s], source)
+        return await hold {
             let r: Bool? = await useBluetooth {
                 for _ in 0..<3 {
                     _ = await ble.request(Wire.bleStop(slot: s), timeout: 2.5) { Wire.isAck($0, op: 0xFE, slot: s) }
@@ -376,7 +380,7 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
         safetyStopRunning.insert(r.slot)
         onSafetyStop?(r.slot, problem)
         Task {
-            if await stop(slot: r.slot) != .stopped { await stopAll() }
+            if await stop(slot: r.slot, source: .safety) != .stopped { await stopAll(source: .safety) }
             safetyStopRunning.remove(r.slot)
         }
     }

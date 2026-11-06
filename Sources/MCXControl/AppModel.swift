@@ -38,6 +38,7 @@ enum AppSection: String, CaseIterable, Identifiable { case live = "Live", progra
 
     @ObservationIgnored private var trackers = [RunTracker(), RunTracker(), RunTracker(), RunTracker()]
     @ObservationIgnored private var slotProgram: [Program?] = [nil, nil, nil, nil]
+    @ObservationIgnored private var stopCommands: [StopRecord?] = [nil, nil, nil, nil]
     @ObservationIgnored private var awake: NSObjectProtocol?
     @ObservationIgnored private var replayNoticeShown = false
     @ObservationIgnored private var saveProblemShown = false
@@ -62,7 +63,7 @@ enum AppSection: String, CaseIterable, Identifiable { case live = "Live", progra
         for s in 0..<4 {
             if let r = store.openRun(slot: s) {
                 let samples = store.samples(run: r.id)
-                currentRun[s] = r.id; live[s] = samples; slotCell[s] = r.cellID; slotProgram[s] = r.program
+                currentRun[s] = r.id; live[s] = samples; slotCell[s] = r.cellID; slotProgram[s] = r.program; stopCommands[s] = r.stop
                 trackers[s] = RunTracker(resuming: .init(type: r.rawType, mode: r.rawMode, lastElapsed: samples.last?.elapsed ?? 0))
             } else if let last = runs.first(where: { $0.slot == s }) {
                 live[s] = store.samples(run: last.id)
@@ -70,6 +71,7 @@ enum AppSection: String, CaseIterable, Identifiable { case live = "Live", progra
         }
         charger.onReading = { [weak self] r, t in self?.handle(r, at: t) }
         charger.onSafetyStop = { [weak self] slot, why in self?.alert("Slot \(slot + 1) stopped by the app", "Its \(why).") }
+        charger.onStopCommand = { [weak self] slots, source in self?.noteStop(slots: slots, source: source) }
         if canNotify { UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in } }
         charger.start(replayCSV: env["MCX_REPLAY"])
         Task { await watchConnection() }
@@ -108,7 +110,9 @@ enum AppSection: String, CaseIterable, Identifiable { case live = "Live", progra
                 guard let id = currentRun[s] else { continue }
                 let a = Analysis.analyze(live[s])
                 liveAnalysis[s] = a
-                store.finish(run: id, status: status.raw, reason: reason.rawValue, at: t, analysis: a)
+                let stop = reason == .stopped ? StopRecord.attribute(command: stopCommands[s], lastActive: live[s].last?.time) : nil
+                store.finish(run: id, status: status.raw, reason: reason.rawValue, at: t, analysis: a, stop: stop)
+                stopCommands[s] = nil
                 let who = cell(runs.first { $0.id == id }?.cellID)?.label ?? "Slot \(s + 1)"
                 currentRun[s] = nil; slotProgram[s] = nil; runs = store.runs(); updateAwake()
                 let cap = a.dischargeCapacity ?? (a.chargeCapacity > 0 ? a.chargeCapacity : nil)
@@ -120,6 +124,15 @@ enum AppSection: String, CaseIterable, Identifiable { case live = "Live", progra
                 case .stopped: break
                 }
             }
+        }
+    }
+
+    private func noteStop(slots: [Int], source: StopSource) {
+        let command = StopRecord(source: source, time: Date())
+        for s in slots {
+            guard let id = currentRun[s] else { continue }
+            stopCommands[s] = command
+            store.noteStop(run: id, command)
         }
     }
 

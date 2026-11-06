@@ -1,5 +1,35 @@
 import Foundation
 
+public enum StopSource: String, Codable, Sendable {
+    case stopAll = "stop_all", slotStop = "slot_stop", safety, outsideApp = "outside_app"
+    public var label: String {
+        switch self {
+        case .stopAll: "Stop all slots button"
+        case .slotStop: "slot's Stop button"
+        case .safety: "app's safety stop"
+        case .outsideApp: "no command from this app"
+        }
+    }
+}
+
+/// What ended a stopped run. `time` is when the app sent its command, so it's nil for `.outsideApp`.
+public struct StopRecord: Equatable, Sendable, Hashable {
+    public var source: StopSource
+    public var time: Date?
+    public init(source: StopSource, time: Date?) { self.source = source; self.time = time }
+
+    /// Longest a slot can plausibly keep reading active after a command, including a reconnect and the app's own confirmation.
+    public static let commandGrace: TimeInterval = 30
+
+    /// A command only explains the stop if the run didn't carry on after it. Going by the last active reading, rather than when
+    /// the stop was noticed, keeps the credit right when the connection dropped in between.
+    public static func attribute(command: StopRecord?, lastActive: Date?) -> StopRecord {
+        guard let command, let sent = command.time else { return StopRecord(source: .outsideApp, time: nil) }
+        if let lastActive, lastActive.timeIntervalSince(sent) > commandGrace { return StopRecord(source: .outsideApp, time: nil) }
+        return command
+    }
+}
+
 /// Turns the reading stream for one slot into runs. Pure logic, so it can be tested against recorded data.
 public struct RunTracker: Sendable {
     public enum Event: Equatable, Sendable {

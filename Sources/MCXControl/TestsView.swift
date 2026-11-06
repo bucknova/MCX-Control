@@ -105,11 +105,16 @@ struct RunReport: View {
         if let e = run.ended { parts.append(Format.clock(Int(e.timeIntervalSince(run.started)))) }
         switch run.endReason {
         case "finished": parts.append("Finished normally")
-        case "stopped": parts.append("Stopped")
+        case "stopped": parts.append(stopText)
         case .some: parts.append(SlotStatus(raw: run.endStatus ?? 0).label)
         case .none: parts.append("Recording")
         }
         return parts.joined(separator: " · ")
+    }
+    private var stopText: String {
+        guard let stop = run.stop else { return "Stopped" } // Saved before stops were tracked.
+        guard let time = stop.time else { return "Stopped, \(stop.source.label)" }
+        return "Stopped by the \(stop.source.label) at \(time.formatted(date: .omitted, time: .standard))"
     }
     private func export(_ s: [Sample]) {
         let p = NSSavePanel(); p.allowedContentTypes = [.commaSeparatedText]

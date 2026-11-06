@@ -52,8 +52,7 @@ struct RootView: View {
                 Button("Stop all slots", systemImage: "stop.fill") { model.stopAll() }
                     .labelStyle(.titleAndIcon)
                     .buttonStyle(.glassProminent).tint(.red)
-                    .keyboardShortcut(".", modifiers: .command)
-                    .help("Stops every slot immediately (⌘.)")
+                    .help("Stops every slot immediately")
             }
         }
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
