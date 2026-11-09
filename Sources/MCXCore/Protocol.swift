@@ -98,6 +98,8 @@ public struct SlotReading: Equatable, Sendable {
     /// The charger keeps a stale resistance while idle, so it only counts during or just after a run.
     public var resistanceIsLive: Bool { status.isActive || status.isDone }
     public var hasCell: Bool { millivolts > 200 }
+    /// The MC5000 has no cell temperature sensor, so its readings carry 0.
+    public var hasTemperature: Bool { temperature > 0 }
 
     public init(slot: Int, rawType: UInt8, rawMode: UInt8, cycle: Int, status: SlotStatus, elapsed: Int, millivolts: Int, loadedMillivolts: Int? = nil, milliamps: Int, capacity: Double, temperature: Double, internalResistance: Int?, energyMilliwattHours: Int? = nil, powerMilliwatts: Int? = nil, chargerTemperature: Double? = nil, source: DataSource) {
         self.slot = slot; self.rawType = rawType; self.rawMode = rawMode; self.cycle = cycle; self.status = status; self.elapsed = elapsed
@@ -127,6 +129,8 @@ public struct Program: Equatable, Hashable, Codable, Sendable {
     public var temperatureCutoff = 45
     public var timeLimitMinutes = 120
     public var dischargeRestMinutes = 0
+    /// MC5000 only. An index into `MC5000.eneloopTypes`.
+    public var eneloopType: Int?
 
     public init() {}
 
@@ -188,6 +192,7 @@ public struct Program: Equatable, Hashable, Codable, Sendable {
          ("-dV", "\(negativeDeltaMillivolts) mV"), ("Trickle", "\(trickleUnits * 10) mA"), ("Keep voltage", Format.volts(keepMillivolts)),
          ("Temperature cutoff", "\(temperatureCutoff) °C"), ("Time limit", timeLimitMinutes == 0 ? "Off" : "\(timeLimitMinutes) min"),
          ("Rest after discharge", "\(dischargeRestMinutes) min")]
+            + (eneloopType.map { [("Eneloop type", MC5000.eneloopTypes[min(max($0, 0), MC5000.eneloopTypes.count - 1)])] } ?? [])
     }
 }
 
@@ -248,6 +253,9 @@ public enum Wire {
         /// The ID every MC3000 seen so far reports. Program and start frames are MC3000-specific; other models use different commands.
         public static let mc3000ID = "100083"
         public var isMC3000: Bool { machineID == Self.mc3000ID }
+        /// The MC5000 can't be asked for its ID from a Mac, because that query needs a Bluetooth address macOS hides. This is set once one answers its status query.
+        public static let mc5000ID = "100214"
+        public var isMC5000: Bool { machineID == Self.mc5000ID }
     }
     private static func ascii(_ b: ArraySlice<UInt8>) -> String { String(decoding: b, as: UTF8.self) }
     /// Bluetooth version replies have a bad checksum on real chargers, so it is not checked.

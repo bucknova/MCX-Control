@@ -225,6 +225,65 @@ struct StopRecording {
     }
 }
 
+struct MC5000Protocol {
+    func hex(_ s: String) -> [UInt8] { s.split(separator: " ").map { UInt8($0, radix: 16)! } }
+    var tested: Program {
+        var p = Program(); p.type = .eneloop; p.mode = .charge; p.chargeCurrent = 200; p.dischargeCurrent = 200; p.capacityLimit = 2500
+        p.chargeStopMillivolts = 1650; p.dischargeStopMillivolts = 1000; p.chargeEndCurrent = 0; p.dischargeEndCurrent = 200
+        p.chargeRestMinutes = 10; p.dischargeRestMinutes = 10; p.cycles = 1; p.cycleMode = 0; p.negativeDeltaMillivolts = 5; p.trickleUnits = 0
+        p.keepMillivolts = 1290; p.temperatureCutoff = 60; p.timeLimitMinutes = 30; p.eneloopType = 2
+        return p
+    }
+    func framesMatchTheRealCharger() {
+        // These frames ran on a real MC5000.
+        expect(MC5000.start(tested, slot: 3) == hex("0F 2A 94 08 00 00 C8 00 C8 09 C4 06 72 03 E8 00 00 00 C8 00 0A 00 0A 01 00 05 00 05 0A 3C 00 1E 01 2C 00 05 00 00 02 00 00 00 00 DB"))
+        var d = tested; d.mode = .discharge
+        expect(MC5000.start(d, slot: 3) == hex("0F 2A 94 08 03 00 C8 00 C8 09 C4 06 72 03 E8 00 00 00 C8 00 0A 00 0A 01 00 05 00 05 0A 3C 00 1E 01 2C 00 05 00 00 02 00 00 00 00 DE"))
+        expect(MC5000.status(slot: 0) == hex("0F 03 91 01 92")); expect(MC5000.status(slot: 3) == hex("0F 03 91 08 99"))
+        expect(MC5000.stop(slot: 3) == hex("0F 03 FE 08 06"))
+        expect(MC5000.isStopAck(hex("0F 04 FE 08 01 07"), slot: 3)); expect(!MC5000.isStopAck(hex("0F 04 FE 08 01 07"), slot: 0))
+        expect(MC5000.isStartAck(hex("0F 04 94 08 01 9D"), slot: 3))
+        expect(!MC5000.isStartAck(hex("0F 04 94 01 01 96"), slot: 3))
+        expect(MC5000.isConnectedNotice(hex("0F 04 06 01 01 08")))
+        // Cycle orders are numbered differently from the MC3000.
+        var c = tested; c.mode = .cycle
+        for (app, wire) in [(0, 0), (1, 2), (2, 1), (3, 3)] { c.cycleMode = app; expect(MC5000.start(c, slot: 0)[3 + 21] == UInt8(wire)) }
+    }
+    func readingsTranslate() {
+        let charging = MC5000.parseStatus(hex("0F 15 91 02 03 E7 05 74 00 00 03 92 00 00 0E 7C 00 33 02 00 00 05 4F"))
+        expect(charging?.slot == 1); expect(charging?.milliamps == 999); expect(charging?.millivolts == 1396); expect(charging?.capacity == 914)
+        expect(charging?.elapsed == 3708); expect(charging?.internalResistance == 51); expect(charging?.status.label == "Charging"); expect(charging?.type == .eneloop); expect(charging?.hasTemperature == false)
+        let idle = MC5000.parseStatus(hex("0F 15 91 08 00 00 05 78 00 00 00 00 00 00 00 00 00 00 00 00 00 05 1B"))
+        expect(idle?.slot == 3); expect(idle?.status.isIdle == true); expect(idle?.millivolts == 1400); expect(idle?.internalResistance == nil)
+        expect(MC5000.parseStatus(hex("0F 15 91 02 03 E7 05 74 00 00 03 92 00 00 0E 7C 00 33 02 00 00 05 50")) == nil)
+        expect(MC5000.parseStatus(hex("0F 04 06 01 01 08")) == nil)
+        func st(_ wire: UInt8, _ err: UInt8) -> SlotStatus {
+            var b: [UInt8] = hex("0F 15 91 01 00 00 05 78 00 00 00 00 00 00 00 00 00 00") + [wire, 0, err, 5]
+            b.append(Wire.checksum(b[2...]))
+            return MC5000.parseStatus(b)!.status
+        }
+        expect(st(0, 0).isIdle); expect(st(1, 0).isIdle); expect(st(2, 0).raw == 1); expect(st(3, 0).raw == 2); expect(st(4, 0).raw == 3); expect(st(5, 0).isDone); expect(st(6, 0).isDone); expect(st(2, 7).isFault)
+    }
+    func normalizes() {
+        var p = tested; p.capacityLimit = 0; p.chargeRestMinutes = 0; p.timeLimitMinutes = 606; p.chargeEndCurrent = 54; p.cycles = 5
+        let q = MC5000.normalized(p)
+        expect(q.capacityLimit == 10000); expect(q.chargeRestMinutes == 1); expect(q.timeLimitMinutes == 630); expect(q.chargeEndCurrent == 50); expect(q.cycles == 1)
+        var off = p; off.timeLimitMinutes = 0; expect(MC5000.normalized(off).timeLimitMinutes == 0)
+        var n = tested; n.type = .nimh; expect(MC5000.normalized(n).eneloopType == nil); expect(MC5000.start(n, slot: 0)[3 + 32] == 3)
+        var e = tested; e.eneloopType = nil; expect(MC5000.normalized(e).eneloopType == MC5000.defaultEneloopType)
+    }
+    func validationRules() {
+        func blocked(_ p: Program, _ m: ChargerModel) -> Bool { Limits.validate(p, ratedCapacity: 2500, model: m).contains { $0.severity == .blocker } }
+        var base = tested; base.keepMillivolts = 1350 // The tested frame used the app's 1.29 V default, below the range offered to people.
+        expect(!blocked(base, .mc5000))
+        var li = base; li.type = .liIon; li.chargeStopMillivolts = 4200; li.dischargeStopMillivolts = 3000; li.keepMillivolts = 0
+        expect(blocked(li, .mc5000)); expect(!blocked(li, .mc3000))
+        var dv = base; dv.negativeDeltaMillivolts = 2; expect(blocked(dv, .mc5000)); expect(!blocked(dv, .mc3000))
+        var cy = base; cy.mode = .cycle; cy.cycles = 4; expect(blocked(cy, .mc5000)); expect(!blocked(cy, .mc3000))
+        var ds = base; ds.mode = .discharge; ds.dischargeStopMillivolts = 550; expect(blocked(ds, .mc5000))
+    }
+}
+
 struct Analyzing {
     func sample(_ t: Double, _ st: UInt8, mA: Int = 1000, cap: Double, energy: Int? = nil) -> Sample {
         Sample(time: Date(timeIntervalSince1970: t), cycle: 0, status: st, elapsed: Int(t), millivolts: 1400, loadedMillivolts: nil, milliamps: mA, capacity: cap, temperature: 26, internalResistance: 30, energy: energy, source: .usb)
@@ -345,6 +404,10 @@ run("Analyzing.energyAcrossConnectionChange") { Analyzing().energyAcrossConnecti
 run("Analyzing.efficiencyNeedsBothDirections") { Analyzing().efficiencyNeedsBothDirections() }
 run("Analyzing.downsamplingKeepsDips") { Analyzing().downsamplingKeepsDips() }
 run("Analyzing.chartLineStaysWhole") { Analyzing().chartLineStaysWhole() }
+run("MC5000Protocol.framesMatchTheRealCharger") { MC5000Protocol().framesMatchTheRealCharger() }
+run("MC5000Protocol.readingsTranslate") { MC5000Protocol().readingsTranslate() }
+run("MC5000Protocol.normalizes") { MC5000Protocol().normalizes() }
+run("MC5000Protocol.validationRules") { MC5000Protocol().validationRules() }
 run("Analyzing.packMatching") { Analyzing().packMatching() }
 run("Analyzing.csvHasEveryRow") { Analyzing().csvHasEveryRow() }
 print("\(checks) checks, \(failures) failures")

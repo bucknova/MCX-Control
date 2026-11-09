@@ -70,11 +70,14 @@ import MCXCore
     }
 }
 
-struct BluetoothCandidate: Identifiable, Equatable { let id: UUID; let name: String; let signal: Int }
+struct BluetoothCandidate: Identifiable, Equatable { let id: UUID; let name: String; let signal: Int; let model: ChargerModel }
 
 @MainActor final class BluetoothLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private static let names: Set<String> = ["Charger", "SimpleBLEPeripheral", "HitecCharger"]
     private static let savedKey = "chargerBluetoothID"
+    private static let savedModelKey = "chargerBluetoothModel"
+    /// The MC5000 advertises as "#Charger-" plus four characters, and doesn't list its service in the advertisement.
+    private static func model(named name: String) -> ChargerModel? { names.contains(name) ? .mc3000 : name.hasPrefix("#Charger-") ? .mc5000 : nil }
     private let service = CBUUID(string: "FFE0"), characteristicID = CBUUID(string: "FFE1")
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -93,20 +96,23 @@ struct BluetoothCandidate: Identifiable, Equatable { let id: UUID; let name: Str
 
     /// The one charger this Mac is allowed to connect to. The app never pairs with a nearby charger on its own.
     var pairedID: UUID? { UserDefaults.standard.string(forKey: Self.savedKey).flatMap(UUID.init(uuidString:)) }
+    var pairedModel: ChargerModel { UserDefaults.standard.string(forKey: Self.savedModelKey).flatMap(ChargerModel.init(rawValue:)) ?? .mc3000 }
 
     func start() { central = CBCentralManager(delegate: self, queue: .main) }
 
     func pair(with id: UUID) {
         guard let f = found[id] else { return }
         UserDefaults.standard.set(id.uuidString, forKey: Self.savedKey)
+        UserDefaults.standard.set(f.candidate.model.rawValue, forKey: Self.savedModelKey)
         peripheral = f.peripheral; peripheral?.delegate = self
         central.stopScan(); found = [:]; onCandidates?([])
     }
     func forgetPairing() async {
         await disconnect()
         UserDefaults.standard.removeObject(forKey: Self.savedKey)
+        UserDefaults.standard.removeObject(forKey: Self.savedModelKey)
         peripheral = nil; found = [:]; onCandidates?([])
-        if central?.state == .poweredOn { central.scanForPeripherals(withServices: [service]) }
+        if central?.state == .poweredOn { central.scanForPeripherals(withServices: nil) }
     }
 
     private func dropConnection() {
@@ -120,7 +126,7 @@ struct BluetoothCandidate: Identifiable, Equatable { let id: UUID; let name: Str
     nonisolated func centralManagerDidUpdateState(_ c: CBCentralManager) { MainActor.assumeIsolated {
         unauthorized = c.state == .unauthorized
         guard c.state == .poweredOn else { dropConnection(); return } // No disconnect callback is guaranteed when the radio goes off.
-        if pairedID == nil { c.scanForPeripherals(withServices: [service]) }
+        if pairedID == nil { c.scanForPeripherals(withServices: nil) }
     } }
     nonisolated func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral, advertisementData a: [String: Any], rssi: NSNumber) {
         MainActor.assumeIsolated {
@@ -131,8 +137,8 @@ struct BluetoothCandidate: Identifiable, Equatable { let id: UUID; let name: Str
             }
             // Other devices advertise the same service (an FNB58 meter does), so the name has to match too.
             let name = (a[CBAdvertisementDataLocalNameKey] as? String) ?? p.name ?? ""
-            guard Self.names.contains(name) else { return }
-            found[p.identifier] = (p, BluetoothCandidate(id: p.identifier, name: name, signal: rssi.intValue))
+            guard let model = Self.model(named: name) else { return }
+            found[p.identifier] = (p, BluetoothCandidate(id: p.identifier, name: name, signal: rssi.intValue, model: model))
             onCandidates?(found.values.map(\.candidate).sorted { $0.signal > $1.signal })
         }
     }
@@ -168,7 +174,7 @@ struct BluetoothCandidate: Identifiable, Equatable { let id: UUID; let name: Str
         return await withCheckedContinuation { k in
             readyK.append(k)
             if peripheral == nil, let p = central.retrievePeripherals(withIdentifiers: [paired]).first { peripheral = p; p.delegate = self }
-            if let p = peripheral { central.connect(p) } else { central.scanForPeripherals(withServices: [service]) }
+            if let p = peripheral { central.connect(p) } else { central.scanForPeripherals(withServices: nil) }
             DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
                 MainActor.assumeIsolated {
                     // Only this attempt's own timeout may end it; an earlier one's timer must not cancel a later attempt.
@@ -211,6 +217,13 @@ struct BluetoothCandidate: Identifiable, Equatable { let id: UUID; let name: Str
                 MainActor.assumeIsolated { if let self, self.requestID == id, let w = self.pending { self.pending = nil; w.k.resume(returning: nil) } }
             }
         }
+    }
+    /// Sends a frame longer than one write as 20-byte chunks about 50 ms apart, and waits for its reply.
+    func request(chunked f: [UInt8], timeout: Double, match: @escaping ([UInt8]) -> Bool) async -> [UInt8]? {
+        await lock.acquire(); defer { lock.release() }
+        let starts = Array(stride(from: 0, to: f.count, by: 20))
+        for s in starts.dropLast() { write(Array(f[s..<(s + 20)])); try? await Task.sleep(nanoseconds: 50_000_000) }
+        return await replyAfter(write: Array(f[starts.last!...]), timeout: timeout, match: match)
     }
     /// Programs go out as two 20-byte chunks about 50 ms apart.
     func writeProgram(_ frame: [UInt8], slot: Int) async -> Bool {

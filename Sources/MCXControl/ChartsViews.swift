@@ -22,9 +22,11 @@ struct RunCharts: View, Equatable {
     @Local private var metric = "Voltage"
     var body: some View {
         let p = chartPoints(samples)
+        let hasTemperature = samples.contains { $0.temperature > 0 }
         VStack(alignment: .leading, spacing: 10) {
-            Picker("Chart", selection: $metric) { ForEach(["Voltage", "Current", "Temperature"], id: \.self) { Text($0) } }
+            Picker("Chart", selection: $metric) { ForEach(hasTemperature ? ["Voltage", "Current", "Temperature"] : ["Voltage", "Current"], id: \.self) { Text($0) } }
                 .pickerStyle(.segmented).labelsHidden().fixedSize()
+                .onChange(of: hasTemperature, initial: true) { if !hasTemperature && metric == "Temperature" { metric = "Voltage" } }
             if p.isEmpty {
                 ContentUnavailableView("No readings yet", systemImage: "chart.xyaxis.line", description: Text("The chart fills in once a run starts.")).frame(maxWidth: .infinity, minHeight: height)
             } else {

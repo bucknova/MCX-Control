@@ -43,11 +43,15 @@ public enum Limits {
         }
     }
 
-    public static func validate(_ p: Program, ratedCapacity rated: Int) -> [ProgramIssue] {
+    public static func validate(_ p: Program, ratedCapacity rated: Int, model: ChargerModel = .mc3000) -> [ProgramIssue] {
         var out: [ProgramIssue] = []
         func block(_ f: String, _ m: String) { out.append(.init(severity: .blocker, field: f, message: m)) }
         func warn(_ f: String, _ m: String) { out.append(.init(severity: .warning, field: f, message: m)) }
 
+        if model == .mc5000 {
+            guard MC5000.canProgram(p.type) else { block("Type", "\(p.type.name) can be monitored on the MC5000, but only NiMH and Eneloop can be programmed so far."); return out }
+            out += MC5000.issues(p)
+        }
         guard p.type.canProgram, let v = voltages(for: p.type) else {
             block("Type", "\(p.type.name) can be monitored, but the app can't program it yet.")
             return out

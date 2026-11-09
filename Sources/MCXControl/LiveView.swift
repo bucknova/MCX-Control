@@ -28,10 +28,10 @@ struct SlotTile: View {
                 Text(r.map { "\($0.type?.name ?? "Unknown") · \($0.mode?.name(for: $0.type) ?? "")" } ?? "Waiting for charger").font(.callout).foregroundStyle(.secondary)
                 if let r, r.hasCell {
                     Text(Format.volts(r.millivolts)).font(.title.weight(.semibold)).monospacedDigit()
-                    Text(r.status.isActive || r.status.isDone ? String(format: "%d mA · %.0f mAh · %.0f °C", r.milliamps, r.capacity, r.temperature) : String(format: "%.0f °C", r.temperature)).font(.callout).monospacedDigit().foregroundStyle(.secondary)
+                    Text(r.status.isActive || r.status.isDone ? String(format: "%d mA · %.0f mAh", r.milliamps, r.capacity) + (r.hasTemperature ? String(format: " · %.0f °C", r.temperature) : "") : (r.hasTemperature ? String(format: "%.0f °C", r.temperature) : " ")).font(.callout).monospacedDigit().foregroundStyle(.secondary)
                 } else {
                     Text("No cell").font(.title.weight(.medium)).foregroundStyle(.secondary)
-                    Text(r.map { String(format: "%.0f °C", $0.temperature) } ?? " ").font(.callout).foregroundStyle(.secondary)
+                    Text(r.flatMap { $0.hasTemperature ? String(format: "%.0f °C", $0.temperature) : nil } ?? " ").font(.callout).foregroundStyle(.secondary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -73,7 +73,7 @@ struct SlotDetail: View {
                         Metric(title: "Current", value: "\(r.milliamps) mA")
                         Metric(title: "Capacity", value: current ? String(format: r.source == .usb ? "%.1f mAh" : "%.0f mAh", r.capacity) : "–", note: current ? calc.map { String(format: "%.1f calculated", $0) } : nil)
                         Metric(title: "Energy", value: !current ? "–" : r.energyMilliwattHours.map { String(format: "%.3f Wh", Double($0) / 1000) } ?? (a.phases.last.map { String(format: "%.3f Wh", $0.energyWattHours) } ?? "–"), note: !current ? nil : r.energyMilliwattHours != nil ? "Charger measured" : "Calculated")
-                        Metric(title: "Temperature", value: String(format: r.source == .usb ? "%.1f °C" : "%.0f °C", r.temperature), note: r.chargerTemperature.map { String(format: "Charger %.1f °C", $0) })
+                        Metric(title: "Temperature", value: r.hasTemperature ? String(format: r.source == .usb ? "%.1f °C" : "%.0f °C", r.temperature) : "–", note: r.chargerTemperature.map { String(format: "Charger %.1f °C", $0) })
                         Metric(title: "Resistance", value: r.resistanceIsLive ? (r.internalResistance.map { "\($0) mΩ" } ?? "–") : "–")
                         Metric(title: "Elapsed", value: r.status.isActive || r.status.isDone ? Format.clock(r.elapsed) : "–", note: joinedNote(samples))
                     }

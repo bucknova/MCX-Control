@@ -87,7 +87,7 @@ struct RunReport: View {
                                 Text(p.kind == .rest ? "–" : String(format: "%.1f mAh", p.calculatedCapacity))
                                 Text(p.kind == .rest ? "–" : String(format: "%.3f Wh", p.energyWattHours))
                                 Text("\(Format.volts(p.voltageRange.lowerBound)) – \(Format.volts(p.voltageRange.upperBound))")
-                                Text(String(format: "%.1f °C", p.peakTemperature))
+                                Text(p.peakTemperature > 0 ? String(format: "%.1f °C", p.peakTemperature) : "–")
                             }.monospacedDigit()
                         }
                     }

@@ -15,13 +15,13 @@ enum Connection: Equatable { case none, usb, bluetooth, switching, replay
 }
 
 struct SlotCheck: Identifiable, Equatable {
-    enum Outcome: Equatable { case verified, mismatch, writeFailed, unverifiedBluetooth, notAllowed(String) }
+    enum Outcome: Equatable { case verified, mismatch, writeFailed, unverifiedBluetooth, notSentUntilStart, notAllowed(String) }
     let slot: Int
     let sent: Program
     let onCharger: Program?
     let outcome: Outcome
     var id: Int { slot }
-    var canStart: Bool { outcome == .verified || outcome == .unverifiedBluetooth }
+    var canStart: Bool { outcome == .verified || outcome == .unverifiedBluetooth || outcome == .notSentUntilStart }
 }
 
 struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: Program?; let problem: String?; var id: Int { slot } }
@@ -53,17 +53,20 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
     @ObservationIgnored private var strikes = [0, 0, 0, 0]
     @ObservationIgnored private var safetyStopRunning = Set<Int>()
     @ObservationIgnored private var guards: [Int: (program: Program, started: Date)] = [:]
+    @ObservationIgnored private var mc5Primed = false
 
     var identity: Wire.Version? { connection == .bluetooth ? (bluetoothIdentity ?? usbIdentity) : (usbIdentity ?? bluetoothIdentity) }
     var firmware: String? { identity?.firmware }
     var isReplay: Bool { connection == .replay }
     var isPaired: Bool { ble.pairedID != nil }
-    private var usbPreferred: Bool { usb.present && Date() >= usbQuietUntil }
+    private var usbPreferred: Bool { !isMC5000 && usb.present && Date() >= usbQuietUntil }
+    var chargerModel: ChargerModel { ble.pairedModel }
+    private var isMC5000: Bool { ble.pairedModel == .mc5000 }
 
     /// Why this charger can't be written to or started right now, if anything.
     static func blockReason(_ v: Wire.Version?) -> String? {
         guard let v else { return "The charger hasn't identified itself yet. Nothing was sent." }
-        guard v.isMC3000 else { return "This charger hasn't identified itself as an MC3000, and other models use different commands. Nothing was sent." }
+        guard v.isMC3000 || v.isMC5000 else { return "This charger hasn't identified itself as an MC3000, and other models use different commands. Nothing was sent." }
         if v.isFahrenheit == true { return "The charger is set to °F. Temperature cutoffs are only tested in °C, so change it to °C on the charger first. Nothing was sent." }
         return nil
     }
@@ -83,7 +86,7 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
             return
         }
         usb.onChange = { [weak self] in self?.usbIdentity = nil; self?.usbQuietUntil = .distantPast; self?.usbMisses = 0 }
-        ble.onDisconnect = { [weak self] in self?.bluetoothIdentity = nil }
+        ble.onDisconnect = { [weak self] in self?.bluetoothIdentity = nil; self?.mc5Primed = false }
         ble.onCandidates = { [weak self] in self?.candidates = $0 }
         usb.start(); ble.start()
         Task { await pollLoop() }
@@ -138,6 +141,7 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
         bluetoothIdentity = v
     }
     private func pollOnce() async {
+        if isMC5000 { await pollMC5000(); return }
         if usbPreferred {
             if ble.isConnected { await ble.disconnect() }
             var any = false
@@ -190,6 +194,7 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
     // MARK: Stop
     /// Immediate: the command goes out first, without waiting its turn, and the turn is only for confirming it worked.
     @discardableResult func stopAll(source: StopSource = .stopAll) async -> Bool {
+        if isMC5000 { return await stopAllMC5000(source) }
         onStopCommand?(Array(0..<4), source)
         if ble.isConnected { ble.sendNow(Wire.bleStopAll) } else if usb.present { usb.send(Wire.usbStopAll) }
         return await hold {
@@ -224,6 +229,7 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
     enum StopResult { case stopped, failed, needsBluetooth }
     /// Single-slot stop only exists over Bluetooth.
     func stop(slot s: Int, source: StopSource = .slotStop) async -> StopResult {
+        if isMC5000 { return await stopMC5000(slot: s, source: source) }
         onStopCommand?([s], source)
         return await hold {
             let r: Bool? = await useBluetooth {
@@ -244,6 +250,8 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
     /// Writes the program to each slot and reads back every field where it can. Nothing starts here.
     func writeAndCheck(_ p: Program, slots: [Int]) async -> [SlotCheck] {
         guard p.isEncodable else { return slots.map { SlotCheck(slot: $0, sent: p, onCharger: nil, outcome: .notAllowed("A value in this program is out of range. Nothing was sent.")) } }
+        if isMC5000 { return await checkMC5000(p, slots: slots) }
+        var p = p; p.eneloopType = nil
         return await hold {
             let viaUSB = usbPreferred
             if viaUSB {
@@ -284,7 +292,8 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
 
     /// Starts only these slots, over Bluetooth. Without Bluetooth, USB can only start every loaded slot, so that needs a separate confirmation.
     func start(checks: [SlotCheck]) async -> StartOutcome {
-        await hold {
+        if isMC5000 { return await startMC5000(checks: checks) }
+        return await hold {
             let ready = checks.filter(\.canStart)
             guard !ready.isEmpty else { return .failed("No slot passed its check.") }
             let usbView = readings
@@ -363,11 +372,118 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
         }
     }
 
+    // MARK: MC5000
+    private func mc5Status(_ s: Int, timeout: Double = 1.5) async -> SlotReading? {
+        guard let r = await ble.request(MC5000.status(slot: s), timeout: timeout, match: { MC5000.isStatus($0, slot: s) }).flatMap(MC5000.parseStatus) else { return nil }
+        if bluetoothIdentity == nil { bluetoothIdentity = Wire.Version(firmware: "", hardware: "", machineID: Wire.Version.mc5000ID) }
+        return r
+    }
+    /// The first command after connecting gets a short notice instead of its reply, so a throwaway one goes first.
+    private func connectMC5000(timeout: Double) async -> Bool {
+        guard await ble.connect(timeout: timeout) else { return false }
+        connection = .bluetooth
+        if !mc5Primed {
+            _ = await ble.request(MC5000.status(slot: 0), timeout: 0.8) { MC5000.isConnectedNotice($0) || $0.count == 23 }
+            mc5Primed = true
+        }
+        return true
+    }
+    private func pollMC5000() async {
+        if !ble.isConnected { connection = .none }
+        guard await connectMC5000(timeout: 6), holds == 0 else { return }
+        // Requests a quarter second apart got every reply in testing; faster than that started losing some.
+        for s in 0..<4 where holds == 0 {
+            if let r = await mc5Status(s) { publish(r) }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+    }
+    /// Sending the program is what starts a slot, so this only checks the slots are ready. Nothing goes to the charger here.
+    private func checkMC5000(_ p: Program, slots: [Int]) async -> [SlotCheck] {
+        await hold {
+            let sent = MC5000.normalized(p)
+            guard await connectMC5000(timeout: 8) else { return slots.map { SlotCheck(slot: $0, sent: sent, onCharger: nil, outcome: .writeFailed) } }
+            var out: [SlotCheck] = []
+            for s in slots {
+                guard let now = await mc5Status(s) else { out.append(SlotCheck(slot: s, sent: sent, onCharger: nil, outcome: .writeFailed)); continue }
+                publish(now)
+                let outcome: SlotCheck.Outcome = now.status.isActive ? .notAllowed("This slot is running. Nothing was sent.") : !now.hasCell ? .notAllowed("There's no cell in this slot. Nothing was sent.") : .notSentUntilStart
+                out.append(SlotCheck(slot: s, sent: sent, onCharger: nil, outcome: outcome))
+            }
+            return out
+        }
+    }
+    private func startMC5000(checks: [SlotCheck]) async -> StartOutcome {
+        await hold {
+            let ready = checks.filter(\.canStart)
+            guard !ready.isEmpty else { return .failed("No slot passed its check.") }
+            guard await connectMC5000(timeout: 8) else { return .failed("Couldn't reach the charger over Bluetooth.") }
+            var problems: [String] = []
+            for c in ready {
+                let s = c.slot
+                guard var now = await mc5Status(s) else { problems.append("Slot \(s + 1) didn't answer."); continue }
+                if now.status.isDone || now.status.isFault {
+                    _ = await ble.request(MC5000.stop(slot: s), timeout: 2.5) { MC5000.isStopAck($0, slot: s) }
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    guard let cleared = await mc5Status(s) else { problems.append("Slot \(s + 1) didn't answer."); continue }
+                    now = cleared
+                }
+                guard now.status.isIdle, now.hasCell else { problems.append("Slot \(s + 1) wasn't ready, so nothing was sent to it."); continue }
+                guard await ble.request(chunked: MC5000.start(c.sent, slot: s), timeout: 3, match: { MC5000.isStartAck($0, slot: s) }) != nil else { problems.append("Slot \(s + 1) didn't confirm the program."); continue }
+                guards[s] = (c.sent, Date())
+                // The charger acknowledges a program even when it doesn't start, so only the live status counts.
+                var running: SlotReading?
+                let end = Date().addingTimeInterval(10)
+                while running == nil, Date() < end {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    if let r = await mc5Status(s) { publish(r); if r.status.isActive { running = r } }
+                }
+                guard let running else { guards[s] = nil; problems.append("Slot \(s + 1) accepted the program but didn't start."); continue }
+                if running.rawType != c.sent.type.rawValue || running.rawMode != c.sent.mode.rawValue {
+                    onStopCommand?([s], .safety)
+                    _ = await ble.request(MC5000.stop(slot: s), timeout: 2.5) { MC5000.isStopAck($0, slot: s) }
+                    guards[s] = nil
+                    problems.append("Slot \(s + 1) started with the wrong type or mode, so it was stopped.")
+                }
+            }
+            return problems.isEmpty ? .started : .failed(problems.joined(separator: " "))
+        }
+    }
+    private func stopMC5000(slot s: Int, source: StopSource) async -> StopResult {
+        onStopCommand?([s], source)
+        return await hold {
+            guard await connectMC5000(timeout: 8) else { return .failed }
+            for _ in 0..<3 {
+                _ = await ble.request(MC5000.stop(slot: s), timeout: 2.5) { MC5000.isStopAck($0, slot: s) }
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                if let r = await mc5Status(s) { publish(r); if !r.status.isActive { guards[s] = nil; return .stopped } }
+            }
+            return .failed
+        }
+    }
+    /// Immediate: the stops go out first, without waiting a turn, and the turn is only for confirming and retrying.
+    private func stopAllMC5000(_ source: StopSource) async -> Bool {
+        onStopCommand?(Array(0..<4), source)
+        if ble.isConnected {
+            for s in 0..<4 { ble.sendNow(MC5000.stop(slot: s)); try? await Task.sleep(nanoseconds: 60_000_000) }
+        }
+        return await hold {
+            guard await connectMC5000(timeout: 6) else { return false }
+            let end = Date().addingTimeInterval(8)
+            while Date() < end {
+                var rs: [SlotReading] = []
+                for s in 0..<4 { if let r = await mc5Status(s) { publish(r); rs.append(r) } }
+                if rs.count == 4, rs.allSatisfy({ !$0.status.isActive }) { guards.removeAll(); return true }
+                for r in rs where r.status.isActive { _ = await ble.request(MC5000.stop(slot: r.slot), timeout: 2) { MC5000.isStopAck($0, slot: r.slot) } }
+            }
+            return false
+        }
+    }
+
     // MARK: Runtime protection
     private func runtimeGuard(_ r: SlotReading) {
         let g = guards[r.slot]
         // On a °F charger the reading's unit is unconfirmed, so the app's own temperature check would misfire. The charger's cutoff still applies.
-        var problem = Limits.runtimeProblem(r, program: g?.program, checkTemperature: identity?.isFahrenheit != true)
+        var problem = Limits.runtimeProblem(r, program: g?.program, checkTemperature: identity?.isFahrenheit != true && !isMC5000)
         // Bluetooth can't read a program back, so the first readings after a start are the check: wrong type or mode gets stopped.
         if let g, Date().timeIntervalSince(g.started) > 5, r.status.isActive, r.rawType != g.program.type.rawValue || r.rawMode != g.program.mode.rawValue {
             problem = "it started as \(r.type?.name ?? "an unknown type") \(r.mode?.name(for: r.type) ?? ""), not the program that was sent"
