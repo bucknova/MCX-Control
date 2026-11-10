@@ -8,16 +8,26 @@ struct ProgramView: View {
     @Local private var presetName = ""
     var body: some View {
         @Bindable var model = model
-        let issues = Limits.validate(model.draft, ratedCapacity: model.draftRated)
+        let chargerModel = model.charger.chargerModel
+        let issues = Limits.validate(model.draft, ratedCapacity: model.draftRated, model: chargerModel)
         let blocked = issues.contains { $0.severity == .blocker }
         let p = model.draft
         Form {
             Section {
-                Picker("Battery type", selection: Binding(get: { model.draft.type }, set: { apply(type: $0) })) { ForEach(BatteryType.allCases.filter(\.canProgram)) { Text($0.name).tag($0) } }
+                Picker("Battery type", selection: Binding(get: { model.draft.type }, set: { apply(type: $0) })) { ForEach(BatteryType.allCases.filter { chargerModel == .mc5000 ? MC5000.canProgram($0) : $0.canProgram }) { Text($0.name).tag($0) } }
+                if chargerModel == .mc5000 && p.type == .eneloop {
+                    Picker("Eneloop type", selection: Binding(get: { model.draft.eneloopType ?? MC5000.defaultEneloopType }, set: { model.draft.eneloopType = $0 })) { ForEach(MC5000.eneloopTypes.indices, id: \.self) { Text(MC5000.eneloopTypes[$0]).tag($0) } }
+                }
                 Picker("Mode", selection: Binding(get: { model.draft.mode }, set: { m in
                     // Break-in has its own slow currents, so entering it starts from those. You can still change them.
-                    if m == .storageOrBreakIn && model.draft.type.isNickel { model.draft = Limits.suggested(type: model.draft.type, mode: m, rated: model.draftRated) } else { model.draft.mode = m }
-                })) { ForEach(ChargeMode.allCases) { Text($0.name(for: model.draft.type)).tag($0) } }
+                    if m == .storageOrBreakIn && model.draft.type.isNickel { model.draft = Limits.suggested(type: model.draft.type, mode: m, rated: model.draftRated) } else {
+                        model.draft.mode = m
+                        // Lithium keeps its storage target in the same field as the charge stop.
+                        if model.draft.type.isLithium, let v = Limits.voltages(for: model.draft.type) {
+                            model.draft.chargeStopMillivolts = (m == .storageOrBreakIn ? Limits.storageVoltage(for: model.draft.type)?.typical : nil) ?? v.chargeTypical
+                        }
+                    }
+                })) { ForEach(ChargeMode.allCases.filter { !(chargerModel == .mc5000 && p.type.isLithium && $0 == .refresh) }) { Text($0.name(for: model.draft.type)).tag($0) } }
                 field("Rated capacity", value: $model.draftRated, unit: "mAh", hint: "1C = \(model.draftRated) mA")
                 HStack {
                     Text("Set currents").foregroundStyle(.secondary)
@@ -48,7 +58,7 @@ struct ProgramView: View {
             }
             Section("Backstops") {
                 field("Capacity limit", value: $model.draft.capacityLimit, unit: "mAh", hint: "Ends the run at this capacity. 0 is off.", issues: issues, key: "Capacity limit")
-                field("Temperature cutoff", value: $model.draft.temperatureCutoff, unit: "°C", issues: issues, key: "Temperature cutoff")
+                field("Temperature cutoff", value: $model.draft.temperatureCutoff, unit: "°C", hint: chargerModel == .mc5000 ? "The MC5000 can't measure cell temperature without SkyRC's separate probe." : nil, issues: issues, key: "Temperature cutoff")
                 field("Time limit, whole program", value: $model.draft.timeLimitMinutes, unit: "min", hint: "0 is off.", issues: issues, key: "Time limit")
             }
         }
@@ -70,7 +80,7 @@ struct ProgramView: View {
                     Button("Save as preset…") { showSave = true }
                 }
                 .menuStyle(.button).buttonStyle(.glass).fixedSize()
-                Button("Write and check") { showCheck = true }
+                Button(chargerModel == .mc5000 ? "Check program" : "Write and check") { showCheck = true }
                     .buttonStyle(.glassProminent)
                     .disabled(blocked || model.draftSlots.isEmpty || model.charger.connection == .replay)
             }
@@ -86,7 +96,8 @@ struct ProgramView: View {
         }
     }
     private func apply(type: BatteryType) {
-        let mode = model.draft.mode
+        // The MC5000 has no Refresh for lithium cells.
+        let mode = model.charger.chargerModel == .mc5000 && type.isLithium && model.draft.mode == .refresh ? ChargeMode.charge : model.draft.mode
         model.draft = Limits.suggested(type: type, mode: mode, rated: model.draftRated)
     }
     private func setRate(_ c: Double) {
@@ -135,7 +146,7 @@ struct CheckSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(phase == .writing ? "Writing to the charger…" : "Check before start").font(.title2.weight(.semibold))
+            Text(phase != .writing ? "Check before start" : model.charger.chargerModel == .mc5000 ? "Checking the slots…" : "Writing to the charger…").font(.title2.weight(.semibold))
             if phase == .writing { ProgressView().frame(maxWidth: .infinity, minHeight: 120) }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
@@ -222,14 +233,14 @@ struct CheckCard: View {
                 table(zip(sent, got).map { ($0.name, $0.value, $1.value) }, red: false)
             }
             if check.outcome == .verified { Button(showAll ? "Hide fields" : "Show all \(sent.count) fields") { showAll.toggle() }.buttonStyle(.link) }
-            if check.outcome == .unverifiedBluetooth { Text("The app will watch the first readings after the start and stop the slot if its type or mode is wrong, or a limit is passed.").font(.callout) }
+            if check.outcome == .unverifiedBluetooth || check.outcome == .notSentUntilStart { Text("The app will watch the first readings after the start and stop the slot if its type or mode is wrong, or a limit is passed.").font(.callout) }
         }
         .panel()
     }
     private var title: String {
-        switch check.outcome { case .verified: "All \(check.sent.fields.count) fields match"; case .mismatch: "Program doesn't match"; case .writeFailed: "Write failed"; case .unverifiedBluetooth: "Sent, can't read back"; case .notAllowed: "Not sent" }
+        switch check.outcome { case .verified: "All \(check.sent.fields.count) fields match"; case .mismatch: "Program doesn't match"; case .writeFailed: "Write failed"; case .unverifiedBluetooth: "Sent, can't read back"; case .notSentUntilStart: "Ready to send"; case .notAllowed: "Not sent" }
     }
-    private var color: Color { switch check.outcome { case .verified: .green; case .mismatch, .writeFailed: .red; case .unverifiedBluetooth, .notAllowed: .orange } }
+    private var color: Color { switch check.outcome { case .verified: .green; case .mismatch, .writeFailed: .red; case .unverifiedBluetooth, .notSentUntilStart, .notAllowed: .orange } }
     private var explanation: String {
         switch check.outcome {
         case .verified: "The charger holds exactly what was sent. Starting one slot switches to Bluetooth, so logging pauses on every slot for about 5–7 seconds, and the gap is marked."
@@ -238,6 +249,7 @@ struct CheckCard: View {
         case .writeFailed: "The charger didn't accept this program, or the slot is busy. Its stored program may be unchanged. Try again."
         case .notAllowed(let reason): reason
         case .unverifiedBluetooth: "The charger acknowledged it. Reading a program back needs the USB cable, so what's stored can't be confirmed."
+        case .notSentUntilStart: "The MC5000 starts as soon as it receives a program, so nothing is sent until you press Start. It also can't report a program back."
         }
     }
     private func table(_ rows: [(String, String, String)], red: Bool) -> some View {

@@ -225,6 +225,102 @@ struct StopRecording {
     }
 }
 
+struct MC5000Protocol {
+    func hex(_ s: String) -> [UInt8] { s.split(separator: " ").map { UInt8($0, radix: 16)! } }
+    var tested: Program {
+        var p = Program(); p.type = .eneloop; p.mode = .charge; p.chargeCurrent = 200; p.dischargeCurrent = 200; p.capacityLimit = 2500
+        p.chargeStopMillivolts = 1650; p.dischargeStopMillivolts = 1000; p.chargeEndCurrent = 0; p.dischargeEndCurrent = 200
+        p.chargeRestMinutes = 10; p.dischargeRestMinutes = 10; p.cycles = 1; p.cycleMode = 0; p.negativeDeltaMillivolts = 5; p.trickleUnits = 0
+        p.keepMillivolts = 1290; p.temperatureCutoff = 60; p.timeLimitMinutes = 30; p.eneloopType = 2
+        return p
+    }
+    func framesMatchTheRealCharger() {
+        // These frames ran on a real MC5000.
+        expect(MC5000.start(tested, slot: 3) == hex("0F 2A 94 08 00 00 C8 00 C8 09 C4 06 72 03 E8 00 00 00 C8 00 0A 00 0A 01 00 05 00 05 0A 3C 00 1E 01 2C 00 05 00 00 02 00 00 00 00 DB"))
+        var d = tested; d.mode = .discharge
+        expect(MC5000.start(d, slot: 3) == hex("0F 2A 94 08 03 00 C8 00 C8 09 C4 06 72 03 E8 00 00 00 C8 00 0A 00 0A 01 00 05 00 05 0A 3C 00 1E 01 2C 00 05 00 00 02 00 00 00 00 DE"))
+        expect(MC5000.status(slot: 0) == hex("0F 03 91 01 92")); expect(MC5000.status(slot: 3) == hex("0F 03 91 08 99"))
+        expect(MC5000.stop(slot: 3) == hex("0F 03 FE 08 06"))
+        expect(MC5000.isStopAck(hex("0F 04 FE 08 01 07"), slot: 3)); expect(!MC5000.isStopAck(hex("0F 04 FE 08 01 07"), slot: 0))
+        expect(MC5000.isStartAck(hex("0F 04 94 08 01 9D"), slot: 3))
+        expect(!MC5000.isStartAck(hex("0F 04 94 01 01 96"), slot: 3))
+        expect(MC5000.isConnectedNotice(hex("0F 04 06 01 01 08")))
+        // Cycle orders are numbered differently from the MC3000.
+        var c = tested; c.mode = .cycle
+        for (app, wire) in [(0, 0), (1, 2), (2, 1), (3, 3)] { c.cycleMode = app; expect(MC5000.start(c, slot: 0)![3 + 21] == UInt8(wire)) }
+    }
+    func readingsTranslate() {
+        let charging = MC5000.parseStatus(hex("0F 15 91 02 03 E7 05 74 00 00 03 92 00 00 0E 7C 00 33 02 00 00 05 4F"))
+        expect(charging?.slot == 1); expect(charging?.milliamps == 999); expect(charging?.millivolts == 1396); expect(charging?.capacity == 914)
+        expect(charging?.elapsed == 3708); expect(charging?.internalResistance == 51); expect(charging?.status.label == "Charging"); expect(charging?.type == .eneloop); expect(charging?.hasTemperature == false)
+        let idle = MC5000.parseStatus(hex("0F 15 91 08 00 00 05 78 00 00 00 00 00 00 00 00 00 00 00 00 00 05 1B"))
+        expect(idle?.slot == 3); expect(idle?.status.isIdle == true); expect(idle?.millivolts == 1400); expect(idle?.internalResistance == nil)
+        expect(MC5000.parseStatus(hex("0F 15 91 02 03 E7 05 74 00 00 03 92 00 00 0E 7C 00 33 02 00 00 05 50")) == nil)
+        expect(MC5000.parseStatus(hex("0F 04 06 01 01 08")) == nil)
+        func st(_ wire: UInt8, _ err: UInt8) -> SlotStatus {
+            var b: [UInt8] = hex("0F 15 91 01 00 00 05 78 00 00 00 00 00 00 00 00 00 00") + [wire, 0, err, 5]
+            b.append(Wire.checksum(b[2...]))
+            return MC5000.parseStatus(b)!.status
+        }
+        expect(st(0, 0).isIdle); expect(st(1, 0).isIdle); expect(st(2, 0).raw == 1); expect(st(3, 0).raw == 2); expect(st(4, 0).raw == 3); expect(st(5, 0).isDone); expect(st(6, 0).isDone); expect(st(2, 7).isFault)
+    }
+    func normalizes() {
+        var p = tested; p.capacityLimit = 0; p.chargeRestMinutes = 0; p.timeLimitMinutes = 606; p.chargeEndCurrent = 54; p.cycles = 5
+        let q = MC5000.normalized(p)
+        expect(q.capacityLimit == 10000); expect(q.chargeRestMinutes == 1); expect(q.timeLimitMinutes == 630); expect(q.chargeEndCurrent == 50); expect(q.cycles == 1)
+        var off = p; off.timeLimitMinutes = 0; expect(MC5000.normalized(off).timeLimitMinutes == 0)
+        var n = tested; n.type = .nimh; expect(MC5000.normalized(n).eneloopType == nil); expect(MC5000.start(n, slot: 0)![3 + 32] == 3)
+        var e = tested; e.eneloopType = nil; expect(MC5000.normalized(e).eneloopType == MC5000.defaultEneloopType)
+    }
+    func lithium() {
+        var p = Limits.suggested(type: .liIon, mode: .charge, rated: 2500)
+        func blocked(_ q: Program) -> Bool { Limits.validate(q, ratedCapacity: 2500, model: .mc5000).contains { $0.severity == .blocker } }
+        expect(!blocked(p))
+        var f = MC5000.start(p, slot: 1)!
+        expect(f[3] == 2); expect(f[3 + 1] == 0); expect(f[3 + 32] == 0); expect(Int(f[3 + 8]) << 8 | Int(f[3 + 9]) == 4200); expect(Int(f[3 + 33]) << 8 | Int(f[3 + 34]) == 3800)
+        expect(f[3 + 22] == 6); expect(f[3 + 23] == 0)
+        p.mode = .discharge; expect(MC5000.start(p, slot: 0)![3 + 1] == 2)
+        p.mode = .cycle; expect(MC5000.start(p, slot: 0)![3 + 1] == 3)
+        p.mode = .refresh; expect(MC5000.start(p, slot: 0) == nil); expect(blocked(p))
+        var s = Limits.suggested(type: .liIon, mode: .storageOrBreakIn, rated: 2500)
+        expect(!blocked(s))
+        f = MC5000.start(s, slot: 0)!
+        expect(f[3 + 1] == 1); expect(Int(f[3 + 8]) << 8 | Int(f[3 + 9]) == 4200); expect(Int(f[3 + 33]) << 8 | Int(f[3 + 34]) == 3800)
+        s.chargeStopMillivolts = 3900; expect(blocked(s))
+        // Limits that differ by chemistry.
+        var hv = Limits.suggested(type: .li435, mode: .charge, rated: 2500); expect(!blocked(hv)); expect(MC5000.start(hv, slot: 0)![3 + 32] == 1)
+        hv.chargeStopMillivolts = 4200; expect(blocked(hv))
+        var lfp = Limits.suggested(type: .liFe, mode: .charge, rated: 2500); expect(!blocked(lfp)); expect(MC5000.start(lfp, slot: 0)![3 + 32] == 2)
+        lfp.chargeStopMillivolts = 4200; expect(blocked(lfp))
+        var low = Limits.suggested(type: .liIon, mode: .charge, rated: 2500); low.chargeEndCurrent = 0; expect(blocked(low))
+        var hot = Limits.suggested(type: .liIon, mode: .charge, rated: 2500); hot.chargeStopMillivolts = 4300; expect(blocked(hot))
+        // Storage can start above its target. A real cell at 4.05 V was stopped by mistake before this.
+        var st = Limits.suggested(type: .liIon, mode: .storageOrBreakIn, rated: 5000); st.chargeCurrent = 200; st.dischargeCurrent = 200
+        let high = read(0, 1, mV: 4052)
+        expect(Limits.runtimeProblem(high, program: st, checkTemperature: false) == nil)
+        expect(Limits.runtimeProblem(read(0, 1, mV: 4350), program: st, checkTemperature: false) != nil)
+        var ch = Limits.suggested(type: .liIon, mode: .charge, rated: 5000); ch.chargeCurrent = 200
+        expect(Limits.runtimeProblem(read(0, 0, mV: 4350), program: ch, checkTemperature: false) != nil)
+        // Lithium modes read back as the app's own numbers.
+        func read(_ type: UInt8, _ mode: UInt8, mV: Int = 3600) -> SlotReading {
+            var b: [UInt8] = hex("0F 15 91 01 00 C8") + [UInt8(mV >> 8), UInt8(mV & 255)] + hex("00 00 00 00 00 00 00 05 00 20 02") + [mode, 0, type]
+            b.append(Wire.checksum(b[2...]))
+            return MC5000.parseStatus(b)!
+        }
+        expect(read(0, 1).mode == .storageOrBreakIn); expect(read(0, 2).mode == .discharge); expect(read(1, 3).mode == .cycle); expect(read(1, 0).type == .li435); expect(read(2, 1).type == .liFe)
+        expect(read(3, 3).mode == .discharge); expect(read(6, 1).mode == .discharge); expect(read(6, 1).type == .nizn)
+    }
+    func validationRules() {
+        func blocked(_ p: Program, _ m: ChargerModel) -> Bool { Limits.validate(p, ratedCapacity: 2500, model: m).contains { $0.severity == .blocker } }
+        var base = tested; base.keepMillivolts = 1350 // The tested frame used the app's 1.29 V default, below the range offered to people.
+        expect(!blocked(base, .mc5000))
+        var nz = base; nz.type = .nizn; expect(blocked(nz, .mc5000))
+        var dv = base; dv.negativeDeltaMillivolts = 2; expect(blocked(dv, .mc5000)); expect(!blocked(dv, .mc3000))
+        var cy = base; cy.mode = .cycle; cy.cycles = 4; expect(blocked(cy, .mc5000)); expect(!blocked(cy, .mc3000))
+        var ds = base; ds.mode = .discharge; ds.dischargeStopMillivolts = 550; expect(blocked(ds, .mc5000))
+    }
+}
+
 struct Analyzing {
     func sample(_ t: Double, _ st: UInt8, mA: Int = 1000, cap: Double, energy: Int? = nil) -> Sample {
         Sample(time: Date(timeIntervalSince1970: t), cycle: 0, status: st, elapsed: Int(t), millivolts: 1400, loadedMillivolts: nil, milliamps: mA, capacity: cap, temperature: 26, internalResistance: 30, energy: energy, source: .usb)
@@ -345,6 +441,11 @@ run("Analyzing.energyAcrossConnectionChange") { Analyzing().energyAcrossConnecti
 run("Analyzing.efficiencyNeedsBothDirections") { Analyzing().efficiencyNeedsBothDirections() }
 run("Analyzing.downsamplingKeepsDips") { Analyzing().downsamplingKeepsDips() }
 run("Analyzing.chartLineStaysWhole") { Analyzing().chartLineStaysWhole() }
+run("MC5000Protocol.framesMatchTheRealCharger") { MC5000Protocol().framesMatchTheRealCharger() }
+run("MC5000Protocol.readingsTranslate") { MC5000Protocol().readingsTranslate() }
+run("MC5000Protocol.normalizes") { MC5000Protocol().normalizes() }
+run("MC5000Protocol.validationRules") { MC5000Protocol().validationRules() }
+run("MC5000Protocol.lithium") { MC5000Protocol().lithium() }
 run("Analyzing.packMatching") { Analyzing().packMatching() }
 run("Analyzing.csvHasEveryRow") { Analyzing().csvHasEveryRow() }
 print("\(checks) checks, \(failures) failures")

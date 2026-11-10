@@ -108,7 +108,8 @@ struct ConnectionChip: View {
         HStack(spacing: 6) {
             Circle().fill(c == .none ? Color.orange : c == .switching ? Color.yellow : Color.green).frame(width: 8, height: 8)
             Text(c.label)
-            if let f = model.charger.firmware { Text("· Firmware \(f)").foregroundStyle(.secondary) }
+            if model.charger.identity?.isMC5000 == true { Text("· MC5000").foregroundStyle(.secondary) }
+            else if let f = model.charger.firmware { Text("· Firmware \(f)").foregroundStyle(.secondary) }
         }
         .font(.callout).padding(.horizontal, 8)
         .contextMenu {
@@ -152,7 +153,7 @@ struct PairingBar: View {
             Text(model.charger.candidates.count > 1 ? "More than one is nearby. The strongest signal is usually the closest." : "Only pair with a charger you own.").font(.callout).foregroundStyle(.secondary)
             HStack {
                 ForEach(model.charger.candidates) { c in
-                    Button("\(c.name) ···\(c.id.uuidString.suffix(4)) · \(c.signal) dBm") { model.charger.pair(with: c.id) }.buttonStyle(.glass)
+                    Button("\(c.model.name) \(c.name) ···\(c.id.uuidString.suffix(4)) · \(c.signal) dBm") { model.charger.pair(with: c.id) }.buttonStyle(.glass)
                 }
             }
         }

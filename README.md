@@ -48,7 +48,9 @@ The app's limit checks are the main protection against bad values, and they can 
 
 **The charger must be set to °C.** Programs are locked on a charger set to °F, because that setting hasn't been tested.
 
-**MC5000 and other models aren't supported.** The app re-reads the charger's machine ID before each write or start and refuses unless it matches the MC3000's. NiZn, RAM, LTO and Na-ion can be monitored but not programmed.
+**MC5000 support is new and partly tested.** Over Bluetooth, the app monitors all four slots and can start and stop NiMH, Eneloop and lithium programs. Brief runs at about 200 mA on real hardware covered NiMH charge, Eneloop charge and discharge, and Li-ion charge, discharge and Storage. LiHV, LiFePO4, Refresh, Break-in, Cycle and full-length lithium runs haven't, so use them with care. The charger can't sense cell temperature, so stay with lithium cells while they run. The MC5000 has no USB data connection and no cell temperature sensor, and it can't report a stored program back, so the app confirms each start from the live readings. Its capacity readings ran about 11% below current times time in testing, so don't compare them directly with MC3000 results yet. To use an MC5000, pair with it in the app; the app works with one Bluetooth charger at a time.
+
+**Other models aren't supported.** On the MC3000 path, the app re-reads the charger's machine ID before each write or start and refuses unless it matches. NiZn, RAM, LTO and Na-ion can be monitored but not programmed. Untested protocol notes for other SkyRC devices are in [docs/other-chargers.md](docs/other-chargers.md); nothing there has been added to the app.
 
 ## How the connections work
 
