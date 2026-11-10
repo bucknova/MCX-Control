@@ -20,8 +20,14 @@ struct ProgramView: View {
                 }
                 Picker("Mode", selection: Binding(get: { model.draft.mode }, set: { m in
                     // Break-in has its own slow currents, so entering it starts from those. You can still change them.
-                    if m == .storageOrBreakIn && model.draft.type.isNickel { model.draft = Limits.suggested(type: model.draft.type, mode: m, rated: model.draftRated) } else { model.draft.mode = m }
-                })) { ForEach(ChargeMode.allCases) { Text($0.name(for: model.draft.type)).tag($0) } }
+                    if m == .storageOrBreakIn && model.draft.type.isNickel { model.draft = Limits.suggested(type: model.draft.type, mode: m, rated: model.draftRated) } else {
+                        model.draft.mode = m
+                        // Lithium keeps its storage target in the same field as the charge stop.
+                        if model.draft.type.isLithium, let v = Limits.voltages(for: model.draft.type) {
+                            model.draft.chargeStopMillivolts = (m == .storageOrBreakIn ? Limits.storageVoltage(for: model.draft.type)?.typical : nil) ?? v.chargeTypical
+                        }
+                    }
+                })) { ForEach(ChargeMode.allCases.filter { !(chargerModel == .mc5000 && p.type.isLithium && $0 == .refresh) }) { Text($0.name(for: model.draft.type)).tag($0) } }
                 field("Rated capacity", value: $model.draftRated, unit: "mAh", hint: "1C = \(model.draftRated) mA")
                 HStack {
                     Text("Set currents").foregroundStyle(.secondary)
@@ -90,7 +96,8 @@ struct ProgramView: View {
         }
     }
     private func apply(type: BatteryType) {
-        let mode = model.draft.mode
+        // The MC5000 has no Refresh for lithium cells.
+        let mode = model.charger.chargerModel == .mc5000 && type.isLithium && model.draft.mode == .refresh ? ChargeMode.charge : model.draft.mode
         model.draft = Limits.suggested(type: type, mode: mode, rated: model.draftRated)
     }
     private func setRate(_ c: Double) {

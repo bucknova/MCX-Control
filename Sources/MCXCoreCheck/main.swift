@@ -247,7 +247,7 @@ struct MC5000Protocol {
         expect(MC5000.isConnectedNotice(hex("0F 04 06 01 01 08")))
         // Cycle orders are numbered differently from the MC3000.
         var c = tested; c.mode = .cycle
-        for (app, wire) in [(0, 0), (1, 2), (2, 1), (3, 3)] { c.cycleMode = app; expect(MC5000.start(c, slot: 0)[3 + 21] == UInt8(wire)) }
+        for (app, wire) in [(0, 0), (1, 2), (2, 1), (3, 3)] { c.cycleMode = app; expect(MC5000.start(c, slot: 0)![3 + 21] == UInt8(wire)) }
     }
     func readingsTranslate() {
         let charging = MC5000.parseStatus(hex("0F 15 91 02 03 E7 05 74 00 00 03 92 00 00 0E 7C 00 33 02 00 00 05 4F"))
@@ -269,15 +269,52 @@ struct MC5000Protocol {
         let q = MC5000.normalized(p)
         expect(q.capacityLimit == 10000); expect(q.chargeRestMinutes == 1); expect(q.timeLimitMinutes == 630); expect(q.chargeEndCurrent == 50); expect(q.cycles == 1)
         var off = p; off.timeLimitMinutes = 0; expect(MC5000.normalized(off).timeLimitMinutes == 0)
-        var n = tested; n.type = .nimh; expect(MC5000.normalized(n).eneloopType == nil); expect(MC5000.start(n, slot: 0)[3 + 32] == 3)
+        var n = tested; n.type = .nimh; expect(MC5000.normalized(n).eneloopType == nil); expect(MC5000.start(n, slot: 0)![3 + 32] == 3)
         var e = tested; e.eneloopType = nil; expect(MC5000.normalized(e).eneloopType == MC5000.defaultEneloopType)
+    }
+    func lithium() {
+        var p = Limits.suggested(type: .liIon, mode: .charge, rated: 2500)
+        func blocked(_ q: Program) -> Bool { Limits.validate(q, ratedCapacity: 2500, model: .mc5000).contains { $0.severity == .blocker } }
+        expect(!blocked(p))
+        var f = MC5000.start(p, slot: 1)!
+        expect(f[3] == 2); expect(f[3 + 1] == 0); expect(f[3 + 32] == 0); expect(Int(f[3 + 8]) << 8 | Int(f[3 + 9]) == 4200); expect(Int(f[3 + 33]) << 8 | Int(f[3 + 34]) == 3800)
+        expect(f[3 + 22] == 6); expect(f[3 + 23] == 0)
+        p.mode = .discharge; expect(MC5000.start(p, slot: 0)![3 + 1] == 2)
+        p.mode = .cycle; expect(MC5000.start(p, slot: 0)![3 + 1] == 3)
+        p.mode = .refresh; expect(MC5000.start(p, slot: 0) == nil); expect(blocked(p))
+        var s = Limits.suggested(type: .liIon, mode: .storageOrBreakIn, rated: 2500)
+        expect(!blocked(s))
+        f = MC5000.start(s, slot: 0)!
+        expect(f[3 + 1] == 1); expect(Int(f[3 + 8]) << 8 | Int(f[3 + 9]) == 4200); expect(Int(f[3 + 33]) << 8 | Int(f[3 + 34]) == 3800)
+        s.chargeStopMillivolts = 3900; expect(blocked(s))
+        // Limits that differ by chemistry.
+        var hv = Limits.suggested(type: .li435, mode: .charge, rated: 2500); expect(!blocked(hv)); expect(MC5000.start(hv, slot: 0)![3 + 32] == 1)
+        hv.chargeStopMillivolts = 4200; expect(blocked(hv))
+        var lfp = Limits.suggested(type: .liFe, mode: .charge, rated: 2500); expect(!blocked(lfp)); expect(MC5000.start(lfp, slot: 0)![3 + 32] == 2)
+        lfp.chargeStopMillivolts = 4200; expect(blocked(lfp))
+        var low = Limits.suggested(type: .liIon, mode: .charge, rated: 2500); low.chargeEndCurrent = 0; expect(blocked(low))
+        var hot = Limits.suggested(type: .liIon, mode: .charge, rated: 2500); hot.chargeStopMillivolts = 4300; expect(blocked(hot))
+        // Storage can start above its target. A real cell at 4.05 V was stopped by mistake before this.
+        var st = Limits.suggested(type: .liIon, mode: .storageOrBreakIn, rated: 5000); st.chargeCurrent = 200; st.dischargeCurrent = 200
+        let high = read(0, 1, mV: 4052)
+        expect(Limits.runtimeProblem(high, program: st, checkTemperature: false) == nil)
+        expect(Limits.runtimeProblem(read(0, 1, mV: 4350), program: st, checkTemperature: false) != nil)
+        var ch = Limits.suggested(type: .liIon, mode: .charge, rated: 5000); ch.chargeCurrent = 200
+        expect(Limits.runtimeProblem(read(0, 0, mV: 4350), program: ch, checkTemperature: false) != nil)
+        // Lithium modes read back as the app's own numbers.
+        func read(_ type: UInt8, _ mode: UInt8, mV: Int = 3600) -> SlotReading {
+            var b: [UInt8] = hex("0F 15 91 01 00 C8") + [UInt8(mV >> 8), UInt8(mV & 255)] + hex("00 00 00 00 00 00 00 05 00 20 02") + [mode, 0, type]
+            b.append(Wire.checksum(b[2...]))
+            return MC5000.parseStatus(b)!
+        }
+        expect(read(0, 1).mode == .storageOrBreakIn); expect(read(0, 2).mode == .discharge); expect(read(1, 3).mode == .cycle); expect(read(1, 0).type == .li435); expect(read(2, 1).type == .liFe)
+        expect(read(3, 3).mode == .discharge); expect(read(6, 1).mode == .discharge); expect(read(6, 1).type == .nizn)
     }
     func validationRules() {
         func blocked(_ p: Program, _ m: ChargerModel) -> Bool { Limits.validate(p, ratedCapacity: 2500, model: m).contains { $0.severity == .blocker } }
         var base = tested; base.keepMillivolts = 1350 // The tested frame used the app's 1.29 V default, below the range offered to people.
         expect(!blocked(base, .mc5000))
-        var li = base; li.type = .liIon; li.chargeStopMillivolts = 4200; li.dischargeStopMillivolts = 3000; li.keepMillivolts = 0
-        expect(blocked(li, .mc5000)); expect(!blocked(li, .mc3000))
+        var nz = base; nz.type = .nizn; expect(blocked(nz, .mc5000))
         var dv = base; dv.negativeDeltaMillivolts = 2; expect(blocked(dv, .mc5000)); expect(!blocked(dv, .mc3000))
         var cy = base; cy.mode = .cycle; cy.cycles = 4; expect(blocked(cy, .mc5000)); expect(!blocked(cy, .mc3000))
         var ds = base; ds.mode = .discharge; ds.dischargeStopMillivolts = 550; expect(blocked(ds, .mc5000))
@@ -408,6 +445,7 @@ run("MC5000Protocol.framesMatchTheRealCharger") { MC5000Protocol().framesMatchTh
 run("MC5000Protocol.readingsTranslate") { MC5000Protocol().readingsTranslate() }
 run("MC5000Protocol.normalizes") { MC5000Protocol().normalizes() }
 run("MC5000Protocol.validationRules") { MC5000Protocol().validationRules() }
+run("MC5000Protocol.lithium") { MC5000Protocol().lithium() }
 run("Analyzing.packMatching") { Analyzing().packMatching() }
 run("Analyzing.csvHasEveryRow") { Analyzing().csvHasEveryRow() }
 print("\(checks) checks, \(failures) failures")

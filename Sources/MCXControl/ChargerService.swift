@@ -428,7 +428,8 @@ struct OtherSlotOnStart: Identifiable, Equatable { let slot: Int; let program: P
                     now = cleared
                 }
                 guard now.status.isIdle, now.hasCell else { problems.append("Slot \(s + 1) wasn't ready, so nothing was sent to it."); continue }
-                guard await ble.request(chunked: MC5000.start(c.sent, slot: s), timeout: 3, match: { MC5000.isStartAck($0, slot: s) }) != nil else { problems.append("Slot \(s + 1) didn't confirm the program."); continue }
+                guard let frame = MC5000.start(c.sent, slot: s) else { problems.append("Slot \(s + 1): this cell type doesn't have that mode, so nothing was sent."); continue }
+                guard await ble.request(chunked: frame, timeout: 3, match: { MC5000.isStartAck($0, slot: s) }) != nil else { problems.append("Slot \(s + 1) didn't confirm the program."); continue }
                 guards[s] = (c.sent, Date())
                 // The charger acknowledges a program even when it doesn't start, so only the live status counts.
                 var running: SlotReading?

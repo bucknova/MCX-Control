@@ -1,6 +1,6 @@
 # Other SkyRC chargers: protocol map
 
-> **Mostly untested.** MC-X Control runs the SkyRC MC3000, and the MC5000 for NiMH and Eneloop over Bluetooth. Nothing here adds support for any other device, and the other entries have never been tried on real hardware. Sending the wrong command to a charger can start a charge or change its settings, so treat this as research notes.
+> **Mostly untested.** MC-X Control runs the SkyRC MC3000, and the MC5000 for NiMH, Eneloop and lithium cells over Bluetooth. Nothing here adds support for any other device, and the other entries have never been tried on real hardware. Sending the wrong command to a charger can start a charge or change its settings, so treat this as research notes.
 
 This map lists Bluetooth protocol facts for devices handled by the SkyRC Android app, version 2.94. It was built by reading how that app talks to each device. It contains no SkyRC code. SkyRC does not endorse this project.
 
@@ -90,7 +90,7 @@ Likely `0x55` reply layout, big-endian. The app has several reply variants, so t
 | Slot status | `0x91` (type228: `0x9A`) | Slot mask 1, 2, 4, 8 |
 | Turbo | `0x92` | Not decoded |
 | Read program | `0x93` | Slot index; no MC5000 reply at positions 0–4, including with a slot stopped |
-| **Program and start** | `0x94` | 40 bytes; confirmed on the MC5000 for Eneloop charge and discharge. There is no separate start command |
+| **Program and start** | `0x94` | 40 bytes; confirmed on the MC5000 for Eneloop charge and discharge, NiMH charge, and Li-ion charge, discharge and Storage. There is no separate start command |
 | Write system settings | `0x95` | 17 bytes on the MC5000 |
 | Read system settings | `0x96` | `04`; the MC5000 returns 7 data bytes, meanings not confirmed |
 | Run history | `0x98` | Slot mask; layout below, confirmed on the MC5000 |
@@ -132,7 +132,7 @@ Stopping an MC5000 slot returns `0F 04 FE <mask> 01 <checksum>`, leaves the othe
 
 On the MC5000, the first command after connecting got the short message `0F 04 06 01 01 08` instead of its normal reply in all four correctly framed sessions. Send a throwaway status query first.
 
-`0x94` payload on the MC5000, 40 bytes. The frame is `0F 2A 94`, payload, checksum, 44 bytes in all, sent as 20-byte writes. Pairs are big-endian. Only Eneloop charge and discharge at 200 mA have been tried on hardware; other fields and modes come from the app.
+`0x94` payload on the MC5000, 40 bytes. The frame is `0F 2A 94`, payload, checksum, 44 bytes in all, sent as 20-byte writes. Pairs are big-endian. Only short runs at about 200 mA have been tried on hardware: Eneloop charge and discharge, NiMH charge, and Li-ion charge, discharge and Storage. Other fields and modes come from the app.
 
 | Bytes | Field | Unit | App's range |
 |---|---|---|---|
@@ -157,7 +157,7 @@ On the MC5000, the first command after connecting got the short message `0F 04 0
 | 29–30 | Max capacity | Unconfirmed | |
 | 31 | Turbo | | |
 | 32 | Cell type, 0–9 as in the `0x91` table | | |
-| 33–34 | Storage voltage | mV | |
+| 33–34 | Storage voltage | mV | Used by lithium Storage, which then takes bytes 8–9 as the normal charge voltage (Li-ion 3.70–3.85 V, LiHV 3.85–3.95 V, LiFe 3.25–3.40 V) |
 | 35 | Eneloop type: 0 Std AA, 1 Std AAA, 2 Pro/XX AA, 3 Pro/XX AAA, 4 Lite AA, 5 Lite AAA, 6 Plus AA, 7 Std C, 8 Std D | | |
 
 Modes depend on cell type:
@@ -166,9 +166,9 @@ Modes depend on cell type:
 |---|---|---|---|---|---|
 | Li-ion, LiHV, LiFe, LTO, Na-ion | Charge | Storage | Discharge | Cycle | |
 | NiMH, NiCd, Eneloop | Charge | Refresh | Break-in | Discharge | Cycle |
-| NiZn | Charge | Discharge | Cycle | | |
+| NiZn, RAM | Charge | Discharge | Cycle | | |
 
-Writing this frame starts the slot. The MC5000 answers `0F 04 94 <mask> 01 <checksum>`, and current appears about 4 seconds later. A wrong mask is still acknowledged and simply starts nothing if those slots are busy, so confirm a start from `0x91`. Which cell types use each mode list above is partly inferred; RAM isn't placed yet.
+Writing this frame starts the slot. The MC5000 answers `0F 04 94 <mask> 01 <checksum>`, and current appears about 4 seconds later. A wrong mask is still acknowledged and simply starts nothing if those slots are busy, so confirm a start from `0x91`. NiCd uses the NiMH list; LTO and Na-ion use the lithium list; RAM uses the NiZn list.
 
 On the MC5000, cell temperature comes from a separate Bluetooth probe, and the app appears to send the over-temperature stop itself. That protection may only work while the phone app is connected.
 
